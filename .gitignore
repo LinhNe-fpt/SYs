@@ -1,0 +1,20 @@
+# Thư mục làm việc của test - sinh tự động, không commit.
+# Xem tests/New-TestFixture.ps1 và tests/environments/README.md
+fixtures/
+tests/.work/
+tests/.results/
+tests/.sandbox/
+
+# Môi trường ảo (ISO/VM không bao giờ commit)
+*.iso
+*.vhd
+*.vhdx
+*.vmdk
+.vm/
+
+# PowerShell
+*.log
+
+# Hệ điều hành
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,26 @@
+# Chuẩn hoá line ending để diff không nhiễu giữa máy dev Windows
+# và runner/CI (Linux hoặc Windows).
+#
+# Với PowerShell: CRLF là chuẩn trên Windows, nhưng LF cũng chạy tốt.
+# Để 'text=auto' cho git tự quyết theo nền tảng, tránh cảnh báo
+# "LF will be replaced by CRLF" mỗi lần add.
+
+* text=auto eol=lf
+
+# Script PowerShell: giữ LF khi lưu trong repo, checkout theo OS.
+*.ps1   text eol=lf
+*.psm1  text eol=lf
+*.psd1  text eol=lf
+
+*.md    text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.json  text eol=lf
+
+# Binary: không đụng tới
+*.iso   binary
+*.vhd   binary
+*.vhdx  binary
+*.png   binary
+*.jpg   binary
+*.exe   binary

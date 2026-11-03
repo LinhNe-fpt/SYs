@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+# Máy runner của GitHub Actions là một VM Windows SẠCH, dựng mới cho mỗi lần
+# chạy và bị xoá sau đó. Đây là môi trường test lý tưởng cho một tool xoá
+# dữ liệu: không có gì của người dùng thật để làm hỏng.
+#
+# Lợi ích so với chạy trên máy dev:
+#   * Sạch tuyệt đối: không có project cũ, không có .env thật, không có
+#     Credential Manager của ai cả.
+#   * Nhiều phiên bản Windows: matrix bên dưới.
+#   * Không cần quyền admin trên máy cá nhân.
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          # windows-2022 = Windows Server 2022 (tương đương Win10/11 kernel 10.0)
+          # windows-2025 = Windows Server 2025 (kernel 10.0.26xxx, gần Win11 24H2+)
+          - windows-2022
+          - windows-2025
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Thông tin môi trường
+        shell: pwsh
+        run: |
+          $PSVersionTable | Format-List
+          [Environment]::OSVersion.VersionString
+          Get-CimInstance Win32_OperatingSystem |
+            Select-Object Caption, Version, BuildNumber, OSArchitecture | Format-List
+          'Admin: ' + ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
+      - name: Cài Pester 5
+        shell: pwsh
+        run: |
+          # Runner đã có Pester nhưng thường là 3.4 (bản cũ, không hỗ trợ
+          # -ForEach và cấu hình mới). Luôn cài bản 5 mới nhất.
+          Get-PackageProvider -Name NuGet -ForceBootstrap | Out-Null
+          Install-Module Pester -MinimumVersion 5.0.0 -Scope CurrentUser -Force -SkipPublisherCheck -Confirm:$false
+          Get-Module -ListAvailable Pester | Select-Object Name, Version | Format-Table
+
+      - name: Chạy unit test
+        shell: pwsh
+        run: |
+          $result = './tests/results/unit.xml'
+          New-Item -ItemType Directory -Path './tests/results' -Force | Out-Null
+          ./tests/environments/Invoke-TestSuite.ps1 -Suite Unit -WorkDir "$env:RUNNER_TEMP\psw-work" -ResultPath $result
+
+      - name: Chạy integration test
+        shell: pwsh
+        run: |
+          $result = './tests/results/integration.xml'
+          ./tests/environments/Invoke-TestSuite.ps1 -Suite Integration -WorkDir "$env:RUNNER_TEMP\psw-work" -ResultPath $result
+
+      - name: Kiểm tra long path support
+        shell: pwsh
+        run: |
+          # LongPathAware cần thiết để tool xử lý path > 260 ký tự.
+          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem'
+          $value = (Get-ItemProperty -Path $key -Name LongPathsEnabled -ErrorAction SilentlyContinue).LongPathsEnabled
+          "LongPathsEnabled = $value"
+          if ($value -ne 1) {
+            Write-Warning 'Runner không bật long path ở mức OS; tool vẫn dùng \\?\ prefix nên test vẫn phải pass.'
+          }
+
+      - name: Upload kết quả test
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: tests/results/
+          if-no-files-found: warn
+          retention-days: 14
