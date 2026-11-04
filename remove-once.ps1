@@ -30,10 +30,10 @@
     Mẫu wildcard: file/thư mục khớp sẽ KHÔNG bị xoá.
 
 .PARAMETER MaxFiles
-    Trần số file mỗi lần. Mặc định 20000.
+    Trần số file mỗi lần. 0 = không giới hạn (mặc định).
 
 .PARAMETER MaxBytes
-    Trần tổng dung lượng mỗi lần. Mặc định 20GB.
+    Trần tổng dung lượng mỗi lần. 0 = không giới hạn (mặc định).
 
 .EXAMPLE
     .\remove-once.ps1
@@ -54,9 +54,9 @@ param(
 
     [string]$OutDir,
 
-    [int]$MaxFiles = 20000,
+    [int]$MaxFiles = 0,
 
-    [long]$MaxBytes = 20GB,
+    [long]$MaxBytes = 0,
 
     [switch]$Quiet
 )
@@ -336,11 +336,11 @@ if ($Execute) {
     if ($ConfirmToken -ne 'XOA') {
         Stop-WithError "LỖI: -Execute cần -ConfirmToken XOA (xoá vĩnh viễn, không hoàn tác)."
     }
-    if ($willDelete.Count -gt $MaxFiles) {
-        Stop-WithError ("LỖI: {0} file vượt trần -MaxFiles {1}. Dùng -Keep hoặc tăng trần nếu thật sự muốn." -f $willDelete.Count, $MaxFiles)
+    if ($MaxFiles -gt 0 -and $willDelete.Count -gt $MaxFiles) {
+        Stop-WithError ("LỖI: {0} file vượt trần -MaxFiles {1}. Dùng -Keep, hoặc -MaxFiles 0 để bỏ giới hạn." -f $willDelete.Count, $MaxFiles)
     }
-    if ($totalBytes -gt $MaxBytes) {
-        Stop-WithError ("LỖI: {0:N1} GB vượt trần -MaxBytes {1:N1} GB." -f ($totalBytes / 1GB), ($MaxBytes / 1GB))
+    if ($MaxBytes -gt 0 -and $totalBytes -gt $MaxBytes) {
+        Stop-WithError ("LỖI: {0:N1} GB vượt trần -MaxBytes {1:N1} GB. Dùng -MaxBytes 0 để bỏ giới hạn." -f ($totalBytes / 1GB), ($MaxBytes / 1GB))
     }
 }
 

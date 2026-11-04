@@ -35,8 +35,8 @@
     Nơi ghi kết quả. Mặc định: %USERPROFILE%\presale-scan-<timestamp>
 
 .PARAMETER MaxFilesPerTarget
-    Trần số file liệt kê cho mỗi mục, để node_modules 200.000 file không làm
-    treo máy. Mặc định 50000. Danh sách bị cắt sẽ được ghi rõ.
+    Trần số file liệt kê cho mỗi mục. 0 = không giới hạn (mặc định). Với
+    node_modules rất lớn, đặt số cụ thể (vd 50000) để tránh tốn RAM.
 
 .PARAMETER DevFoldersOnly
     Không quét toàn bộ PC, chỉ quét các thư mục dev quen thuộc
@@ -79,7 +79,7 @@ param(
 
     [string]$OutDir,
 
-    [int]$MaxFilesPerTarget = 50000,
+    [int]$MaxFilesPerTarget = 0,
 
     [switch]$DevFoldersOnly,
 
@@ -718,7 +718,10 @@ function Expand-Target {
         Không tạo object cho từng file: PSCustomObject trên PS 5.1 tốn hàng
         chục µs mỗi cái, với node_modules 50.000 file là mất vài giây.
     #>
-    param([string]$Value, [int]$Limit, [int]$EntryLimit = 750000)
+    param([string]$Value, [int]$Limit, [int]$EntryLimit = 0)
+
+    # $Limit = 0 hoặc $EntryLimit = 0 nghĩa là không giới hạn.
+    $unlimited = $Limit -le 0
 
     $paths = New-Object 'System.Collections.Generic.List[string]'
     $sizes = New-Object 'System.Collections.Generic.List[long]'
@@ -741,7 +744,7 @@ function Expand-Target {
         try {
             foreach ($child in ([System.IO.DirectoryInfo]::new($current)).EnumerateFileSystemInfos()) {
                 $visited++
-                if ($visited -gt $EntryLimit) { $truncated = $true; $stack.Clear(); break }
+                if ($EntryLimit -gt 0 -and $visited -gt $EntryLimit) { $truncated = $true; $stack.Clear(); break }
 
                 $attributes = [int]$child.Attributes
                 if (($attributes -band $reparseFlag) -ne 0) { continue }
@@ -756,7 +759,7 @@ function Expand-Target {
 
                 $length = $child.Length
                 $total += $length
-                if ($paths.Count -ge $Limit) { $truncated = $true; continue }
+                if (-not $unlimited -and $paths.Count -ge $Limit) { $truncated = $true; continue }
 
                 $full = $child.FullName
                 if ($full.StartsWith('\\?\UNC\')) { $full = '\\' + $full.Substring(8) }
@@ -809,7 +812,9 @@ function Invoke-Scan {
     }
 
     # Trần tính riêng cho từng root (mỗi ổ), để ổ C: đầy file không làm bỏ sót ổ D:.
-    $maxEntries = 3000000
+    # Trần entry khi duyệt từng ổ, tránh treo nếu ổ có hàng chục triệu file.
+    # 0 = không giới hạn.
+    $maxEntries = 0
 
     # Vòng duyệt chạy cho mọi entry trên đĩa: đọc sẵn hằng số và lookup ra
     # biến local, tự phân loại inline thay vì gọi hàm cho từng file.
@@ -849,7 +854,7 @@ function Invoke-Scan {
             $depth = $item.Depth
             $secretsOnly = $item.SecretsOnly
 
-            if ($rootEntries -ge $maxEntries) {
+            if ($maxEntries -gt 0 -and $rootEntries -ge $maxEntries) {
                 $stats.Truncated = $true
                 [void]$notes.Add([PSCustomObject]@{
                         Path = $currentPath
@@ -963,8 +968,7 @@ function Invoke-Scan {
                                 Path = $childPath
                                 Note = "Danh sách file bị cắt ở $MaxFilesPerTarget (còn nữa)."
                             })
-                    }
-                    continue
+                    }                    continue
                 }
 
                 # --- File lẻ ---

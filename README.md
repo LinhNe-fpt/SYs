@@ -114,8 +114,12 @@ Xoá thật chỉ khi gõ đủ cả hai:
 
 Xoá vĩnh viễn là **không hoàn tác được**. Khi xoá, công cụ xoá cả file **và**
 các thư mục của target (con trước cha), nên thư mục project không còn lại vỏ
-rỗng; thư mục nào còn file lạ hoặc bị khoá thì được giữ lại. Chế độ `-Execute`
-từ chối chạy nếu:
+rỗng; thư mục nào còn file lạ hoặc bị khoá thì được giữ lại.
+
+Mặc định **không giới hạn** số file / dung lượng: quét liệt kê hết, xoá hết.
+Vẫn có thể tự đặt trần cho an toàn (`-MaxFilesPerTarget` khi quét,
+`-MaxFiles` / `-MaxBytes` khi xoá; `0` = không giới hạn). Chế độ `-Execute`
+vẫn từ chối chạy nếu:
 
 - thiếu `-ConfirmToken XOA`
 - vượt `-MaxFiles` (mặc định 20.000) hoặc `-MaxBytes` (mặc định 20 GB)
