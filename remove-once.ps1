@@ -161,10 +161,17 @@ $scriptsRoot = Get-FullPathSafe $script:ToolRoot
 if ($null -ne $scriptsRoot) { [void]$script:ForbiddenExact.Add($scriptsRoot) }
 
 $script:NeverTouch = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($name in @('Windows', 'Windows.old', 'Program Files', 'Program Files (x86)', 'ProgramData',
-        'Recovery', 'PerfLogs', 'Boot', 'System Volume Information', 'Config.Msi', '$Recycle.Bin',
-        'AppData', 'Application Data', 'Local Settings')) {
+foreach ($name in @('AppData', 'Application Data', 'Local Settings')) {
     [void]$script:NeverTouch.Add($name)
+}
+
+# Thư mục hệ thống chỉ cấm ở CẤP GỐC Ổ. Nếu so ở mọi cấp thì đường dẫn Maven
+# như '...\.m2\repository\org\springframework\boot\...' cũng bị chặn vì có
+# đoạn tên 'boot', khiến không file nào trong .m2 được xoá.
+$script:NeverTouchTopLevel = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($name in @('Windows', 'Windows.old', 'Program Files', 'Program Files (x86)', 'ProgramData',
+        'Recovery', 'PerfLogs', 'Boot', 'System Volume Information', 'Config.Msi', '$Recycle.Bin')) {
+    [void]$script:NeverTouchTopLevel.Add($name)
 }
 
 $script:CriticalFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -187,14 +194,18 @@ function Get-BlockReason {
 
     if ($script:CriticalFiles.Contains($leaf)) { return "File hệ thống: $leaf" }
 
-    for ($i = 1; $i -lt $segments.Count; $i++) {
-        $segment = $segments[$i]
-        # Lịch sử IDE nằm trong AppData: chỉ bỏ qua đúng AppData khi target được
-        # scan gắn nhãn IdeHistory (đã lọc theo danh sách IDE cụ thể).
-        if ($AllowAppData -and ($segment -eq 'AppData' -or $segment -eq 'Local Settings')) { continue }
+    # AppData: cấm ở MỌI cấp (trừ lịch sử IDE được cho phép tường minh).
+    $scanSegments = if ($FullPath -match '^\\\\\?\\(.+)$') { $matches[1].Split('\') } else { $FullPath.Split('\') }
+    foreach ($segment in $scanSegments) {
+        if ([string]::IsNullOrWhiteSpace($segment)) { continue }
+        if ($AllowAppData -and $segment -eq 'AppData') { continue }
         if ($script:NeverTouch.Contains($segment)) { return "Nằm trong thư mục cấm '$segment'." }
     }
 
+    # Thư mục hệ thống: chỉ cấm ở cấp gốc ổ (C:\Windows, C:\Boot, ...).
+    if ($scanSegments.Count -gt 1 -and $script:NeverTouchTopLevel.Contains($scanSegments[1])) {
+        return "Chứa thư mục cấm '$($scanSegments[1])'."
+    }
     foreach ($forbidden in $script:ForbiddenExact) {
         if ([string]::Equals($FullPath, $forbidden, [StringComparison]::OrdinalIgnoreCase)) {
             return "Là thư mục hệ thống/người dùng ($forbidden)."
@@ -495,33 +506,11 @@ if ($Execute) {
 $mode = if ($Execute) { 'delete' } else { 'dry-run' }
 $baseName = if ($Execute) { 'da-xoa' } else { 'ke-hoach-xoa' }
 $stamp = '{0}-{1}' -f $baseName, $script:RunId
-$txtPath = Join-Path $destination "$stamp.txt"
-$jsonPath = Join-Path $destination "$stamp.json"
+# Chỉ ghi MỘT file tóm tắt. Danh sách đường dẫn đã có trong CSV của bước quét
+# rồi; trước đây bước xoá ghi thêm TXT + JSON chứa lại toàn bộ đường dẫn, làm
+# mỗi lần chạy tốn thêm hàng trăm MB.
+$summaryPath = Join-Path $destination "$stamp.json"
 $noBom = New-Object System.Text.UTF8Encoding($false)
-
-$lines = New-Object 'System.Collections.Generic.List[string]'
-if ($Execute) {
-    $lines.Add('# presale-wiper - ĐÃ XOÁ VĨNH VIỄN (không hoàn tác được)')
-} else {
-    $lines.Add('# presale-wiper - KẾ HOẠCH XOÁ (mô phỏng, chưa xoá gì)')
-}
-$lines.Add("# Tạo lúc: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-$lines.Add("# Nguồn: $filesSource")
-$lines.Add("# File: $($willDelete.Count) | Thư mục: $($dirsToRemove.Count) | Bỏ qua: $($skipped.Count)")
-if ($Execute) { $lines.Add("# Đã xoá: $deleted file, $removedDirs thư mục | Lỗi: $($failed.Count)") }
-$lines.Add('')
-foreach ($item in $willDelete) { $lines.Add($item) }
-if ($dirsToRemove.Count -gt 0) {
-    $lines.Add('')
-    $lines.Add('# --- THƯ MỤC ---')
-    foreach ($item in $dirsToRemove) { $lines.Add($item) }
-}
-if ($skipped.Count -gt 0) {
-    $lines.Add('')
-    $lines.Add('# --- BỎ QUA ---')
-    foreach ($item in $skipped) { $lines.Add(('# [{0}] {1}' -f $item.Reason, $item.Path)) }
-}
-[System.IO.File]::WriteAllLines((To-Long $txtPath), $lines.ToArray(), $noBom)
 
 $summary = [ordered]@{
     tool        = 'presale-wiper remove-once'
@@ -539,7 +528,7 @@ $summary = [ordered]@{
     failedList  = @($failed | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
     skippedList = @($skipped | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
 }
-[System.IO.File]::WriteAllText((To-Long $jsonPath), (ConvertTo-Json -InputObject $summary -Depth 6), $noBom)
+[System.IO.File]::WriteAllText((To-Long $summaryPath), (ConvertTo-Json -InputObject $summary -Depth 6), $noBom)
 
 Write-Line ''
 Write-Line ('=' * 76)
@@ -563,7 +552,7 @@ if ($Execute) {
     Write-Line '  Muốn xoá thật, chạy lại với: -Execute -ConfirmToken XOA'
 }
 Write-Line ''
-Write-Line ("  Báo cáo: {0}" -f $txtPath)
+Write-Line ("  Báo cáo: {0}" -f $summaryPath)
 Write-Line ''
 
 if (-not $Execute -and -not $Quiet -and -not $Yes) {

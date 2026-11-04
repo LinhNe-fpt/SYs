@@ -277,7 +277,11 @@ $script:IdeHistoryEntries = @(
     @{ Path = 'AppData\Roaming\JetBrains'; Kind = 'Note'; Label = 'JetBrains' }
 )
 
-$script:NeverTouchNames = @(
+$script:NeverTouchNames = @('AppData', 'Application Data', 'Local Settings')
+
+# Thư mục hệ thống chỉ cấm ở CẤP GỐC Ổ. So ở mọi cấp sẽ chặn nhầm đường dẫn
+# Maven như '...\.m2\repository\org\springframework\boot\...' (có đoạn 'boot').
+$script:NeverTouchTopLevelNames = @(
     '$Recycle.Bin', 'System Volume Information', 'Config.Msi'
     'Recovery', 'PerfLogs', 'Boot', 'Windows.old'
     'Windows', 'Program Files', 'Program Files (x86)', 'ProgramData'
@@ -322,6 +326,7 @@ $script:Lookup = @{
     SecretFiles = New-LookupSet $script:SecretFileNames
     SecretDirs  = New-LookupSet $script:SecretDirNames
     NeverTouch  = New-LookupSet $script:NeverTouchNames
+    NeverTouchTopLevel = New-LookupSet $script:NeverTouchTopLevelNames
     ProfileContainers = New-LookupSet $script:ProfileContainerNames
     SystemProfiles    = New-LookupSet $script:SystemProfileNames
     InstalledBinaries = New-LookupSet $script:InstalledBinaryExtensions
@@ -582,10 +587,17 @@ function Get-BlockReason {
     }
 
     $segments = @($full.Split('\') | Where-Object { $_ -ne '' })
-    for ($i = 1; $i -lt $segments.Count; $i++) {
-        if ($script:Lookup.NeverTouch.Contains($segments[$i])) {
-            return "Chứa thư mục cấm '$($segments[$i])'."
+
+    # AppData: cấm ở MỌI cấp (lịch sử IDE được xử lý riêng, có cho phép tường minh).
+    foreach ($segment in $segments) {
+        if ($script:Lookup.NeverTouch.Contains($segment)) {
+            return "Nằm trong thư mục cấm '$segment'."
         }
+    }
+
+    # Thư mục hệ thống: chỉ cấm ở CẤP GỐC Ổ (C:\Windows, C:\Boot, ...).
+    if ($segments.Count -gt 1 -and $script:Lookup.NeverTouchTopLevel.Contains($segments[1])) {
+        return "Chứa thư mục cấm '$($segments[1])'."
     }
 
     foreach ($name in @('LocalApplicationData', 'ApplicationData')) {
@@ -1266,7 +1278,9 @@ function Out-Report {
         # --- CSV: chi tiết để lọc/sắp xếp trong Excel ---
         $csv.WriteLine('"Path","SizeBytes","SizeText","Kind","Reason"')
 
-        # --- JSON ---
+        # --- JSON: chỉ ghi phần tóm tắt, KHÔNG kèm danh sách file ---
+        # Trước đây JSON chứa toàn bộ đường dẫn, sinh ra bản sao 75-135 MB mỗi
+        # lần quét toàn PC. Giờ dữ liệu chi tiết chỉ nằm trong CSV + TXT.
         $json.WriteLine('{')
         $json.WriteLine('  "tool": "presale-wiper scan-once",')
         $json.WriteLine('  "mode": "scan-only",')
@@ -1281,40 +1295,17 @@ function Out-Report {
         $json.WriteLine("    `"sizeBytes`": $totalBytes,")
         $json.WriteLine('    "sizeText": ' + (ConvertTo-JsonString (Format-Size $totalBytes)))
         $json.WriteLine('  },')
-
-        $json.WriteLine('  "targets": [')
-        for ($i = 0; $i -lt $targets.Count; $i++) {
-            $target = $targets[$i]
-            $separator = if ($i -lt $targets.Count - 1) { ',' } else { '' }
-            $json.WriteLine('    {"path": ' + (ConvertTo-JsonString $target.Path) +
-                ', "kind": "' + $target.Kind + '", "sizeBytes": ' + $target.Size +
-                ', "sizeText": "' + (Format-Size $target.Size) +
-                '", "reason": ' + (ConvertTo-JsonString $target.Reason) + '}' + $separator)
-        }
-        $json.WriteLine('  ],')
-
-        # Danh sách thư mục của từng target: remove-once.ps1 dùng để dọn thư mục
-        # rỗng sau khi xoá file (nếu không, cây thư mục project vẫn còn nguyên).
-        $json.WriteLine('  "targetDirs": [')
-        for ($i = 0; $i -lt $targets.Count; $i++) {
-            $target = $targets[$i]
-            $separator = if ($i -lt $targets.Count - 1) { ',' } else { '' }
-            $json.WriteLine('    {"path": ' + (ConvertTo-JsonString $target.Path) +
-                ', "kind": "' + $target.Kind + '", "dirs": [' +
-                ((@($target.Dirs) | ForEach-Object { ConvertTo-JsonString $_ }) -join ', ') + ']}' + $separator)
-        }
-        $json.WriteLine('  ],')
-
+        $json.WriteLine('  "filesListedIn": ' + (ConvertTo-JsonString $csvPath))
+        $json.WriteLine('}')
 
         # Đường dẫn Windows không chứa ký tự điều khiển, nên chỉ cần thoát \ và ".
         $csvReason = New-Object 'string[]' $kindTargets.Count
-        $jsonKind = New-Object 'string[]' $kindTargets.Count
+        # Đường dẫn Windows không chứa ký tự điều khiển, nên chỉ cần thoát \ và ".
+        $csvReason = New-Object 'string[]' $kindTargets.Count
         for ($t = 0; $t -lt $kindTargets.Count; $t++) {
             $csvReason[$t] = '","' + $kindTargets[$t].Kind + '","' + $kindTargets[$t].Reason.Replace('"', '""') + '"'
-            $jsonKind[$t] = ', "kind": "' + $kindTargets[$t].Kind + '"}'
         }
 
-        $json.WriteLine('  "files": [')
         for ($i = $count - 1; $i -ge 0; $i--) {
             $index = $order[$i]
             $path = $filePaths[$index]
@@ -1331,22 +1322,9 @@ function Out-Report {
 
             $txt.WriteLine($path)
             $csv.WriteLine('"' + $path.Replace('"', '""') + '","' + $size + '","' + $sizeText + $csvReason[$fileOwner[$index]])
-            $separator = if ($i -gt 0) { ',' } else { '' }
-            $json.WriteLine('    {"path": "' + $path.Replace('\', '\\').Replace('"', '\"') + '", "sizeBytes": ' + $size + $jsonKind[$fileOwner[$index]] + $separator)
 
             if ($topFiles.Count -lt 200) { [void]$topFiles.Add([PSCustomObject]@{ Path = $path; Size = $size }) }
         }
-        $json.WriteLine('  ],')
-
-        $noteItems = @($Result.Notes)
-        $json.WriteLine('  "notes": [')
-        for ($i = 0; $i -lt $noteItems.Count; $i++) {
-            $separator = if ($i -lt $noteItems.Count - 1) { ',' } else { '' }
-            $json.WriteLine('    {"path": ' + (ConvertTo-JsonString ([string]$noteItems[$i].Path)) +
-                ', "note": ' + (ConvertTo-JsonString ([string]$noteItems[$i].Note)) + '}' + $separator)
-        }
-        $json.WriteLine('  ]')
-        $json.WriteLine('}')
 
         # --- TXT thư mục: mỗi target kèm cây thư mục của nó ---
         $dirLines = New-Object 'System.Collections.Generic.List[string]'
@@ -1491,6 +1469,48 @@ Write-Stdout ''
 Write-Stdout 'presale-wiper - scan một lần'
 Write-Stdout ("  Thư mục quét : {0}" -f ($roots -join '; '))
 Write-Stdout ("  Nơi ghi kết quả: {0}" -f $destination)
+
+# Dọn kết quả của những lần chạy trước: mỗi lần quét toàn PC sinh ra file
+# danh sách hàng chục tới hàng trăm MB, chạy vài lần là đầy ổ. Chỉ xoá đúng
+# các file do công cụ này tạo (theo mẫu tên), không đụng file khác.
+$staleCleaned = 0
+$staleBytes = 0L
+try {
+    # 1) Các thư mục kết quả mặc định (presale-scan-*) của những lần chạy trước.
+    $staleDirs = @([System.IO.Directory]::GetDirectories((To-LongPath (Split-Path -Parent $destination)), 'presale-scan-*'))
+    foreach ($staleDir in $staleDirs) {
+        $staleFull = [System.IO.Path]::GetFullPath($staleDir).TrimEnd('\')
+        if ([string]::Equals($staleFull, ([System.IO.Path]::GetFullPath($destination).TrimEnd('\')), [StringComparison]::OrdinalIgnoreCase)) { continue }
+        foreach ($pattern in @('danh-sach-file-*', 'danh-sach-thu-muc-*', 'danh-sach-ide-*', 'ke-hoach-xoa-*', 'da-xoa-*')) {
+            foreach ($oldFile in [System.IO.Directory]::GetFiles($staleFull, $pattern)) {
+                try {
+                    $staleBytes += (New-Object System.IO.FileInfo $oldFile).Length
+                    [System.IO.File]::Delete($oldFile)
+                    $staleCleaned++
+                } catch { }
+            }
+        }
+        # Thư mục rỗng sau khi dọn thì bỏ luôn.
+        try { [System.IO.Directory]::Delete($staleFull, $false) } catch { }
+    }
+
+    # 2) Kết quả cũ ngay trong thư mục đích (khi dùng -OutDir riêng).
+    if ([System.IO.Directory]::Exists((To-LongPath $destination))) {
+        foreach ($pattern in @('danh-sach-file-*', 'danh-sach-thu-muc-*', 'danh-sach-ide-*', 'ke-hoach-xoa-*', 'da-xoa-*')) {
+            foreach ($oldFile in [System.IO.Directory]::GetFiles((To-LongPath $destination), $pattern)) {
+                try {
+                    $staleBytes += (New-Object System.IO.FileInfo $oldFile).Length
+                    [System.IO.File]::Delete($oldFile)
+                    $staleCleaned++
+                } catch { }
+            }
+        }
+    }
+} catch { }
+
+if ($staleCleaned -gt 0) {
+    Write-Stdout ("  Đã dọn {0} file kết quả cũ ({1:N1} MB) từ lần chạy trước." -f $staleCleaned, ($staleBytes / 1MB))
+}
 Write-Stdout ''
 Write-Stdout 'Đang quét...'
 
