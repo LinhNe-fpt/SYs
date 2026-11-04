@@ -54,9 +54,14 @@ Nếu bạn chỉ muốn **danh sách file cần dọn** để tự xem, dùng `
 file độc lập, không import module, không cần admin, không hỏi xác nhận, và
 **không chứa bất kỳ lệnh xoá nào**.
 
-Cách dễ nhất: **double-click `scan-once.cmd`** (đặt cùng thư mục với
-`scan-once.ps1`). Windows không mở `.ps1` bằng double-click, nên file `.cmd`
-gọi PowerShell giúp bạn và giữ cửa sổ lại cho tới khi bấm phím.
+Cách dễ nhất: **double-click `presale-scan.cmd`**, một file duy nhất, tạo bằng
+`.\tools\Build-PresaleScanCmd.ps1`. Không hỏi gì: quét xong tự mở thư mục kết
+quả trong Explorer, cửa sổ console tự đóng sau 10 giây. (`scan-once.cmd` làm
+tương tự nhưng cần nằm cạnh `scan-once.ps1`.)
+
+Nếu file được tải qua trình duyệt / Zalo / email, Windows gắn nhãn "từ
+Internet" và hỏi một lần trước khi chạy. Bỏ nhãn trước khi chạy: chuột phải
+file → Properties → tick **Unblock**, hoặc `Unblock-File .\presale-scan.cmd`.
 
 Hoặc từ PowerShell:
 

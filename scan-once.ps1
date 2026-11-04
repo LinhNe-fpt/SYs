@@ -1259,6 +1259,11 @@ try {
 
 Show-Summary -Report $report
 
+# presale-scan.cmd đặt biến này: mở sẵn kết quả để người dùng không phải đi tìm.
+if ($env:PSW_OPEN_RESULT -eq '1') {
+    try { Start-Process -FilePath 'explorer.exe' -ArgumentList ('/select,"{0}"' -f $report.Txt) } catch { }
+}
+
 if (@($scanResult.Notes).Count -gt 0) {
     Write-Stdout ("Ghi chú ({0}):" -f @($scanResult.Notes).Count)
     foreach ($note in @($scanResult.Notes | Select-Object -First 10)) {
