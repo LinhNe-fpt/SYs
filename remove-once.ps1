@@ -1,61 +1,50 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Dọn file theo danh sách của scan-once.ps1. MẶC ĐỊNH CHỈ MÔ PHỎNG, không xoá gì.
+    Xoá file/thư mục theo danh sách của scan-once.ps1. Mặc định chỉ mô phỏng.
 
 .DESCRIPTION
-    Đọc file JSON do scan-once.ps1 tạo ra (danh-sach-file-*.json), kiểm tra lại
-    từng đường dẫn bằng bộ guard giống bên scan, rồi:
+    Đọc kết quả scan (ưu tiên CSV + danh-sach-thu-muc-*.txt), kiểm tra lại từng
+    đường dẫn bằng bộ guard, rồi:
 
-      - Không có -Execute  : chỉ liệt kê "sẽ xoá gì" ra file kế hoạch. Không
-                             sửa, không xoá, không đổi quyền bất kỳ file nào.
-      - Có -Execute        : xoá vĩnh viễn những file đã qua guard, và chỉ những
-                             file có trong danh sách JSON (không tự tìm thêm).
+      - Không có -Execute : chỉ in ra "sẽ xoá gì". Không đụng vào file nào.
+      - Có -Execute       : xoá file, sau đó xoá các thư mục đã rỗng (con trước
+                            cha). Cần -ConfirmToken XOA.
 
-    Xoá vĩnh viễn là KHÔNG HOÀN TÁC ĐƯỢC. Vì vậy -Execute yêu cầu thêm
-    -ConfirmToken XOA, và từ chối chạy nếu vượt hạn mức an toàn (xem -MaxFiles,
-    -MaxBytes). Nên chạy mô phỏng trước, đọc file kế hoạch, rồi mới quyết định.
+    Xoá là vĩnh viễn, không hoàn tác được.
 
 .PARAMETER Plan
-    File JSON của scan, hoặc thư mục chứa nó (lấy file mới nhất). Bỏ trống thì
-    dùng thư mục presale-scan-* mới nhất trong %USERPROFILE%.
+    Thư mục kết quả scan, hoặc file CSV/JSON. Bỏ trống: dùng presale-scan-*
+    mới nhất trong %USERPROFILE%.
+
+.PARAMETER FromScan
+    Được scan-once.ps1 gọi nội bộ; không dùng trực tiếp.
 
 .PARAMETER Execute
-    Xoá thật. Không có tham số này thì chương trình chỉ mô phỏng.
+    Xoá thật.
 
 .PARAMETER ConfirmToken
-    Phải đúng bằng 'XOA' khi dùng -Execute. Cố ý để không thể xoá do bấm nhầm.
+    Phải bằng 'XOA' khi dùng -Execute.
 
 .PARAMETER Keep
-    Mẫu wildcard trên đường dẫn: file khớp sẽ KHÔNG bị xoá.
-    Ví dụ: -Keep '*\BOT\*','*\VPQL\*'
-
-.PARAMETER OutDir
-    Nơi ghi file kế hoạch / log. Mặc định: cạnh file JSON.
+    Mẫu wildcard: file/thư mục khớp sẽ KHÔNG bị xoá.
 
 .PARAMETER MaxFiles
-    Trần số file được xoá trong một lần. Mặc định 20000. Vượt thì từ chối chạy.
+    Trần số file mỗi lần. Mặc định 20000.
 
 .PARAMETER MaxBytes
-    Trần tổng dung lượng được xoá trong một lần. Mặc định 20GB.
+    Trần tổng dung lượng mỗi lần. Mặc định 20GB.
 
 .EXAMPLE
-    .\remove-once.ps1 -Plan "$env:USERPROFILE\presale-scan-20261104-090000"
-    # Chỉ mô phỏng, ghi ke-hoach-xoa-*.txt/.csv/.json
-
-.EXAMPLE
-    .\remove-once.ps1 -Plan .\presale-scan-... -Execute -ConfirmToken XOA
-    # Xoá thật những gì đã duyệt
-
-.NOTES
-    Guard: không bao giờ xoá file trong Windows / Program Files / ProgramData /
-    AppData, gốc ổ, thùng rác, thư mục đang chứa công cụ này, file hệ thống của
-    ổ (pagefile, hiberfil, ...). Số lượng và dung lượng bị giới hạn.
+    .\remove-once.ps1
+    .\remove-once.ps1 -Execute -ConfirmToken XOA
 #>
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [string]$Plan,
+
+    [switch]$FromScan,
 
     [switch]$Execute,
 
@@ -79,36 +68,29 @@ try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catc
 
 $script:RunId = Get-Date -Format 'yyyyMMdd-HHmmss'
 $script:ToolRoot = $PSScriptRoot
+$script:Green = [ConsoleColor]::Green
+$script:Red = [ConsoleColor]::Red
 
 function Write-Line {
-    param([string]$Text)
+    param([string]$Text, [ConsoleColor]$Color = $script:Green)
+    try {
+        [Console]::ForegroundColor = $Color
+    } catch { }
     [Console]::Out.WriteLine($Text)
 }
 
-function Write-Fail {
+function Write-Error-Line {
     param([string]$Text)
-    Write-Line $Text
-    if ($env:PSW_HIDDEN -eq '1') {
-        try {
-            Add-Type -AssemblyName System.Windows.Forms
-            [void][System.Windows.Forms.MessageBox]::Show($Text, 'presale-wiper remove')
-        } catch { }
-    }
+    Write-Line $Text $script:Red
 }
 
+# Dừng có báo lỗi. Khi được scan-once.ps1 gọi (FromScan), phải THROW chứ không
+# exit, nếu không sẽ giết luôn tiến trình cha.
 function Stop-WithError {
     param([string]$Text)
-    Write-Fail $Text
-    # Script độc lập, không bị dot-source: exit ở đây đặt đúng mã thoát của tiến trình.
+    Write-Error-Line $Text
+    if ($FromScan) { throw [System.OperationCanceledException]::new($Text) }
     exit 2
-}
-
-function To-Long {
-    param([string]$Value)
-    if ([string]::IsNullOrWhiteSpace($Value)) { return $Value }
-    if ($Value.StartsWith('\\?\') -or $Value.StartsWith('.\')) { return $Value }
-    if ($Value.StartsWith('\\')) { return '\\?\UNC\' + $Value.Substring(2).TrimStart('\') }
-    return '\\?\' + $Value
 }
 
 function Format-Bytes {
@@ -120,6 +102,19 @@ function Format-Bytes {
     $index = 0
     while ($value -ge 1024 -and $index -lt 4) { $value = $value / 1024; $index++ }
     return $value.ToString('F1', [System.Globalization.CultureInfo]::InvariantCulture) + ' ' + $units[$index]
+}
+
+function To-Long {
+    param([string]$Value)
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $Value }
+    if ($Value.StartsWith('\\?\')) { return $Value }
+    if ($Value.StartsWith('\\')) { return '\\?\UNC\' + $Value.Substring(2).TrimStart('\') }
+    $full = $Value
+    if (-not [System.IO.Path]::IsPathRooted($full)) {
+        try { $full = [System.IO.Path]::GetFullPath($full) } catch { }
+    }
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }
+    return '\\?\' + $full
 }
 
 function Get-FullPathSafe {
@@ -135,15 +130,15 @@ function Get-FullPathSafe {
 }
 
 # -----------------------------------------------------------------------------
-# Guard: danh sách tuyệt đối không được xoá (giống scan-once.ps1 + thư mục tool)
+# Guard
 # -----------------------------------------------------------------------------
-$script:ForbiddenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$script:ForbiddenExact = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($name in @('SystemRoot', 'windir', 'ProgramFiles', 'ProgramFiles(x86)', 'ProgramW6432',
         'ProgramData', 'ALLUSERSPROFILE', 'USERPROFILE', 'PUBLIC')) {
     $value = [Environment]::GetEnvironmentVariable($name)
     if (-not [string]::IsNullOrWhiteSpace($value)) {
         $full = Get-FullPathSafe $value
-        if ($null -ne $full) { [void]$script:ForbiddenPaths.Add($full) }
+        if ($null -ne $full) { [void]$script:ForbiddenExact.Add($full) }
     }
 }
 foreach ($name in @('Desktop', 'MyDocuments', 'MyPictures', 'MyMusic', 'MyVideos',
@@ -152,19 +147,12 @@ foreach ($name in @('Desktop', 'MyDocuments', 'MyPictures', 'MyMusic', 'MyVideos
         $value = [Environment]::GetFolderPath($name)
         if (-not [string]::IsNullOrWhiteSpace($value)) {
             $full = Get-FullPathSafe $value
-            if ($null -ne $full) { [void]$script:ForbiddenPaths.Add($full) }
+            if ($null -ne $full) { [void]$script:ForbiddenExact.Add($full) }
         }
     } catch { }
 }
-$systemDrive = [Environment]::GetEnvironmentVariable('SystemDrive')
-if ([string]::IsNullOrWhiteSpace($systemDrive)) { $systemDrive = 'C:' }
-foreach ($name in @('Windows', 'Program Files', 'Program Files (x86)', 'ProgramData', 'Users',
-        'PerfLogs', 'Recovery', 'Boot', 'System Volume Information', 'Config.Msi', 'Windows.old')) {
-    $full = Get-FullPathSafe "$systemDrive\$name"
-    if ($null -ne $full) { [void]$script:ForbiddenPaths.Add($full) }
-}
-$toolFull = Get-FullPathSafe $script:ToolRoot
-if ($null -ne $toolFull) { [void]$script:ForbiddenPaths.Add($toolFull) }
+$scriptsRoot = Get-FullPathSafe $script:ToolRoot
+if ($null -ne $scriptsRoot) { [void]$script:ForbiddenExact.Add($scriptsRoot) }
 
 $script:NeverTouch = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 foreach ($name in @('Windows', 'Windows.old', 'Program Files', 'Program Files (x86)', 'ProgramData',
@@ -173,12 +161,11 @@ foreach ($name in @('Windows', 'Windows.old', 'Program Files', 'Program Files (x
     [void]$script:NeverTouch.Add($name)
 }
 
-# File hệ thống: xoá là hỏng máy.
-$script:CriticalFileNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-foreach ($name in @('pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'bootmgr', 'BOOTNXT',
-        'ntldr', 'ntdetect.com', 'desktop.ini', 'thumbs.db', 'dumpstack.log.tmp',
-        'boot.ini', 'io.sys', 'msdos.sys', 'autoexec.bat', 'config.sys')) {
-    [void]$script:CriticalFileNames.Add($name)
+$script:CriticalFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+foreach ($name in @('pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'bootmgr', 'BOOTNXT', 'ntldr',
+        'ntdetect.com', 'desktop.ini', 'thumbs.db', 'boot.ini', 'io.sys', 'msdos.sys',
+        'autoexec.bat', 'config.sys')) {
+    [void]$script:CriticalFiles.Add($name)
 }
 
 function Get-BlockReason {
@@ -189,27 +176,18 @@ function Get-BlockReason {
     if ($FullPath -match '^\\\\') { return 'Đường dẫn mạng.' }
 
     $segments = @($FullPath.Split('\') | Where-Object { $_ -ne '' })
+    if ($segments.Count -eq 0) { return 'Đường dẫn rỗng.' }
     $leaf = $segments[$segments.Count - 1]
 
-    if ($script:CriticalFileNames.Contains($leaf)) { return "File hệ thống: $leaf" }
+    if ($script:CriticalFiles.Contains($leaf)) { return "File hệ thống: $leaf" }
 
     for ($i = 1; $i -lt $segments.Count; $i++) {
         if ($script:NeverTouch.Contains($segments[$i])) { return "Nằm trong thư mục cấm '$($segments[$i])'." }
     }
 
-    # Thư mục đặc biệt của Windows (Desktop, Documents, ...) chỉ bị chặn khi
-    # chính nó là đường dẫn cần xoá; file bên trong vẫn xét tiếp các điều kiện khác.
-    foreach ($forbidden in $script:ForbiddenPaths) {
+    foreach ($forbidden in $script:ForbiddenExact) {
         if ([string]::Equals($FullPath, $forbidden, [StringComparison]::OrdinalIgnoreCase)) {
             return "Là thư mục hệ thống/người dùng ($forbidden)."
-        }
-    }
-
-    # Nằm trong thư mục chứa công cụ này (repo presale-wiper): không tự xoá chính mình.
-    if ($null -ne $toolFull) {
-        $toolPrefix = if ($toolFull.EndsWith('\')) { $toolFull } else { $toolFull + '\' }
-        if ($FullPath.StartsWith($toolPrefix, [StringComparison]::OrdinalIgnoreCase)) {
-            return 'Nằm trong thư mục của chính công cụ này.'
         }
     }
 
@@ -218,17 +196,13 @@ function Get-BlockReason {
         if ($FullPath -like $pattern) { return "Khớp mẫu -Keep '$pattern'." }
     }
 
-    if (-not [System.IO.File]::Exists((To-Long $FullPath))) { return 'File không còn tồn tại.' }
-
     return $null
 }
 
 # -----------------------------------------------------------------------------
-# 1. Đọc kế hoạch từ scan
+# 1. Tìm kết quả scan
 # -----------------------------------------------------------------------------
-$planPath = $Plan
-if ([string]::IsNullOrWhiteSpace($planPath)) {
-    # Double-click: dùng kết quả scan mới nhất.
+if ([string]::IsNullOrWhiteSpace($Plan)) {
     $home_ = [Environment]::GetFolderPath('UserProfile')
     $candidates = @()
     if (-not [string]::IsNullOrWhiteSpace($home_)) {
@@ -236,211 +210,331 @@ if ([string]::IsNullOrWhiteSpace($planPath)) {
                 Sort-Object -Descending)
     }
     if ($candidates.Count -eq 0) {
-        Stop-WithError ('LỖI: chưa có kết quả scan nào trong thư mục người dùng.' + "`r`n" +
-            'Chạy presale-scan.cmd trước, hoặc chỉ định: -Plan <đường dẫn>.')
+        Stop-WithError ('LỖI: chưa có kết quả scan trong thư mục người dùng.' + "`r`n" +
+            'Chạy presale-scan.cmd trước, hoặc chỉ định -Plan <đường dẫn>.')
     }
-    $planPath = $candidates[0]
-}
-if ([System.IO.Directory]::Exists((To-Long $planPath))) {
-    # Ưu tiên CSV: file JSON của lần quét toàn PC có thể hàng trăm MB, đọc bằng
-    # ConvertFrom-Json sẽ ngốn RAM và mất hàng chục giây.
-    $found = @([System.IO.Directory]::GetFiles((To-Long $planPath), 'danh-sach-file-*.csv'))
-    if ($found.Count -eq 0) {
-        $found = @([System.IO.Directory]::GetFiles((To-Long $planPath), 'danh-sach-file-*.json'))
-    }
-    if ($found.Count -eq 0) { Stop-WithError "LỖI: không thấy danh-sach-file-*.csv/.json trong $planPath" }
-    $planPath = $found[0]
-    foreach ($candidate in $found) {
-        if ((Get-Item -LiteralPath $candidate).LastWriteTimeUtc -gt (Get-Item -LiteralPath $planPath).LastWriteTimeUtc) {
-            $planPath = $candidate
-        }
-    }
+    $Plan = $candidates[0]
 }
 
-if (-not [System.IO.File]::Exists((To-Long $planPath))) {
-    Stop-WithError "LỖI: không tìm thấy file kế hoạch: $planPath"
+$planDir = $null
+$filesSource = $null
+$dirsSource = $null
+
+if ([System.IO.Directory]::Exists((To-Long $Plan))) {
+    $planDir = Get-FullPathSafe $Plan
+    $csv = @([System.IO.Directory]::GetFiles((To-Long $planDir), 'danh-sach-file-*.csv') | Sort-Object -Descending)
+    $json = @([System.IO.Directory]::GetFiles((To-Long $planDir), 'danh-sach-file-*.json') | Sort-Object -Descending)
+    $dirs = @([System.IO.Directory]::GetFiles((To-Long $planDir), 'danh-sach-thu-muc-*.txt') | Sort-Object -Descending)
+    if ($csv.Count -gt 0) { $filesSource = $csv[0] }
+    elseif ($json.Count -gt 0) { $filesSource = $json[0] }
+    if ($dirs.Count -gt 0) { $dirsSource = $dirs[0] }
+} else {
+    $full = Get-FullPathSafe $Plan
+    if ($null -eq $full -or -not [System.IO.File]::Exists((To-Long $full))) {
+        Stop-WithError "LỖI: không tìm thấy kết quả scan: $Plan"
+    }
+    $filesSource = $full
+    $planDir = [System.IO.Path]::GetDirectoryName($full)
+    $dirs = @([System.IO.Directory]::GetFiles((To-Long $planDir), 'danh-sach-thu-muc-*.txt') | Sort-Object -Descending)
+    if ($dirs.Count -gt 0) { $dirsSource = $dirs[0] }
 }
 
-$filesFromScan = New-Object 'System.Collections.Generic.List[object]'
-if ($planPath.EndsWith('.csv', [StringComparison]::OrdinalIgnoreCase)) {
-    $reader = New-Object System.IO.StreamReader ((To-Long $planPath), [System.Text.Encoding]::UTF8)
+if ([string]::IsNullOrWhiteSpace($filesSource)) {
+    Stop-WithError "LỖI: không thấy danh-sach-file-*.csv/.json trong $planDir"
+}
+
+# -----------------------------------------------------------------------------
+# 2. Đọc danh sách file
+# -----------------------------------------------------------------------------
+$fileList = New-Object 'System.Collections.Generic.List[string]'
+if ($filesSource.EndsWith('.csv', [StringComparison]::OrdinalIgnoreCase)) {
+    $reader = New-Object System.IO.StreamReader ((To-Long $filesSource), [System.Text.Encoding]::UTF8)
     try {
-        $null = $reader.ReadLine()   # dòng tiêu đề
+        $null = $reader.ReadLine()
         while ($null -ne ($line = $reader.ReadLine())) {
             if ([string]::IsNullOrWhiteSpace($line)) { continue }
-            # CSV của scan chỉ có cột path/size/kind/reason, path có thể chứa dấu phẩy:
-            # lấy phần trong ngoặc kép đầu tiên làm path, các cột sau không cần.
+            # Cột đầu là path trong ngoặc kép (có thể chứa dấu phẩy).
             if ($line[0] -ne '"') { continue }
             $close = $line.IndexOf('","')
             if ($close -lt 0) { continue }
-            $path = $line.Substring(1, $close - 1).Replace('""', '"')
-            [void]$filesFromScan.Add([PSCustomObject]@{ path = $path })
+            $fileList.Add($line.Substring(1, $close - 1).Replace('""', '"'))
         }
-    } finally {
-        $reader.Dispose()
-    }
+    } finally { $reader.Dispose() }
 } else {
-    $planJson = [System.IO.File]::ReadAllText((To-Long $planPath), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
-    if ($null -ne $planJson.PSObject.Properties['files']) { $filesFromScan = @($planJson.files) }
+    $jsonObj = [System.IO.File]::ReadAllText((To-Long $filesSource), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    if ($null -ne $jsonObj.PSObject.Properties['files']) {
+        foreach ($entry in @($jsonObj.files)) { $fileList.Add([string]$entry.path) }
+    }
 }
 
-if ($filesFromScan.Count -eq 0) {
+if ($fileList.Count -eq 0) {
     Write-Line 'Danh sách rỗng - không có gì để dọn.'
-    [Environment]::ExitCode = 0
-    return
+    if ($FromScan) { return } else { exit 0 }
 }
 
 # -----------------------------------------------------------------------------
-# 2. Lọc lại từng file
+# 3. Đọc danh sách thư mục (con trước cha, đã sắp trong file)
 # -----------------------------------------------------------------------------
-$willDelete = New-Object 'System.Collections.Generic.List[object]'
+$dirList = New-Object 'System.Collections.Generic.List[string]'
+if (-not [string]::IsNullOrWhiteSpace($dirsSource)) {
+    $reader = New-Object System.IO.StreamReader ((To-Long $dirsSource), [System.Text.Encoding]::UTF8)
+    try {
+        while ($null -ne ($line = $reader.ReadLine())) {
+            if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
+            $dirList.Add($line)
+        }
+    } finally { $reader.Dispose() }
+}
+
+# -----------------------------------------------------------------------------
+# 4. Lọc lại từng file
+# -----------------------------------------------------------------------------
+$willDelete = New-Object 'System.Collections.Generic.List[string]'
 $skipped = New-Object 'System.Collections.Generic.List[object]'
 $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+$totalBytes = 0L
 
-foreach ($entry in $filesFromScan) {
-    $raw = [string]$entry.path
+foreach ($raw in $fileList) {
     $full = Get-FullPathSafe $raw
     if ($null -eq $full) {
-        [void]$skipped.Add([PSCustomObject]@{ Path = $raw; Reason = 'Đường dẫn không hợp lệ.'; Size = 0L })
+        [void]$skipped.Add([PSCustomObject]@{ Path = $raw; Reason = 'Đường dẫn không hợp lệ.' })
         continue
     }
     if (-not $seen.Add($full)) { continue }
 
     $reason = Get-BlockReason $full
     if ($null -ne $reason) {
-        [void]$skipped.Add([PSCustomObject]@{ Path = $full; Reason = $reason; Size = 0L })
+        [void]$skipped.Add([PSCustomObject]@{ Path = $full; Reason = $reason })
+        continue
+    }
+    if (-not [System.IO.File]::Exists((To-Long $full))) {
+        [void]$skipped.Add([PSCustomObject]@{ Path = $full; Reason = 'File không còn tồn tại.' })
         continue
     }
 
-    $size = 0L
-    try { $size = (New-Object System.IO.FileInfo (To-Long $full)).Length } catch { }
-
-    [void]$willDelete.Add([PSCustomObject]@{ Path = $full; Size = $size; Kind = [string]$entry.kind })
+    try { $totalBytes += (New-Object System.IO.FileInfo (To-Long $full)).Length } catch { }
+    $willDelete.Add($full)
 }
 
-$totalBytes = 0L
-foreach ($item in $willDelete) { $totalBytes += $item.Size }
+$dirsToRemove = New-Object 'System.Collections.Generic.List[string]'
+foreach ($raw in $dirList) {
+    $full = Get-FullPathSafe $raw
+    if ($null -eq $full) { continue }
+    if ($null -ne (Get-BlockReason $full)) { continue }
+    if ([System.IO.Directory]::Exists((To-Long $full))) { $dirsToRemove.Add($full) }
+}
 
 # -----------------------------------------------------------------------------
-# 3. Kết quả
+# 5. Kiểm tra hạn mức
 # -----------------------------------------------------------------------------
-$destination = if ([string]::IsNullOrWhiteSpace($OutDir)) { Split-Path -Parent (Get-FullPathSafe $planPath) } else { $OutDir }
+$destination = if ([string]::IsNullOrWhiteSpace($OutDir)) { $planDir } else { $OutDir }
 if (-not [System.IO.Directory]::Exists((To-Long $destination))) {
     [void][System.IO.Directory]::CreateDirectory((To-Long $destination))
 }
 
-$mode = if ($Execute) { 'delete' } else { 'dry-run' }
-$baseName = if ($Execute) { 'da-xoa' } else { 'ke-hoach-xoa' }
-$stamp = '{0}-{1}' -f $baseName, $script:RunId
-
-$txtPath = Join-Path $destination "$stamp.txt"
-$csvPath = Join-Path $destination "$stamp.csv"
-$jsonPath = Join-Path $destination "$stamp.json"
-
-if ($Execute -and $ConfirmToken -ne 'XOA') {
-    Stop-WithError "LỖI: -Execute cần -ConfirmToken XOA (bạn đang yêu cầu xoá vĩnh viễn)."
-}
-if ($Execute -and $willDelete.Count -gt $MaxFiles) {
-    Stop-WithError ("LỖI: {0} file vượt trần -MaxFiles {1}. Tăng trần nếu thật sự muốn, hoặc dùng -Keep để loại trừ." -f $willDelete.Count, $MaxFiles)
-}
-if ($Execute -and $totalBytes -gt $MaxBytes) {
-    Stop-WithError ("LỖI: {0:N1} GB vượt trần -MaxBytes {1:N1} GB. Tăng trần nếu thật sự muốn." -f ($totalBytes / 1GB), ($MaxBytes / 1GB))
+if ($Execute) {
+    if ($ConfirmToken -ne 'XOA') {
+        Stop-WithError "LỖI: -Execute cần -ConfirmToken XOA (xoá vĩnh viễn, không hoàn tác)."
+    }
+    if ($willDelete.Count -gt $MaxFiles) {
+        Stop-WithError ("LỖI: {0} file vượt trần -MaxFiles {1}. Dùng -Keep hoặc tăng trần nếu thật sự muốn." -f $willDelete.Count, $MaxFiles)
+    }
+    if ($totalBytes -gt $MaxBytes) {
+        Stop-WithError ("LỖI: {0:N1} GB vượt trần -MaxBytes {1:N1} GB." -f ($totalBytes / 1GB), ($MaxBytes / 1GB))
+    }
 }
 
-$deleted = New-Object 'System.Collections.Generic.List[object]'
+# -----------------------------------------------------------------------------
+# 6. In kế hoạch (đủ, không cắt)
+# -----------------------------------------------------------------------------
+Write-Line ''
+Write-Line ('=' * 76)
+if ($Execute) {
+    Write-Line '  presale-wiper - XOÁ VĨNH VIỄN'
+} else {
+    Write-Line '  presale-wiper - KẾ HOẠCH XOÁ (mô phỏng, CHƯA xoá gì)'
+}
+Write-Line ('=' * 76)
+Write-Line ''
+Write-Line ("  Nguồn danh sách : {0}" -f $filesSource)
+Write-Line ("  File sẽ xoá     : {0}  ({1})" -f $willDelete.Count, (Format-Bytes $totalBytes))
+Write-Line ("  Thư mục sẽ dọn  : {0}" -f $dirsToRemove.Count)
+Write-Line ("  Bỏ qua (guard)  : {0}" -f $skipped.Count)
+Write-Line ''
+
+if (-not $Quiet) {
+    if ($willDelete.Count -gt 0) {
+        Write-Line '--- File ---'
+        foreach ($item in $willDelete) { Write-Line ("  {0}" -f $item) }
+        Write-Line ''
+    }
+    if ($dirsToRemove.Count -gt 0) {
+        Write-Line '--- Thư mục (chỉ xoá nếu rỗng) ---'
+        foreach ($item in $dirsToRemove) { Write-Line ("  {0}" -f $item) }
+        Write-Line ''
+    }
+    if ($skipped.Count -gt 0) {
+        Write-Line ("--- Bỏ qua ({0}) ---" -f $skipped.Count)
+        foreach ($item in $skipped) { Write-Line ("  [{0}] {1}" -f $item.Reason, $item.Path) }
+        Write-Line ''
+    }
+}
+
+# -----------------------------------------------------------------------------
+# 7. Xoá
+# -----------------------------------------------------------------------------
+$deleted = 0
+$removedDirs = 0
 $failed = New-Object 'System.Collections.Generic.List[object]'
 
 if ($Execute) {
-    foreach ($item in $willDelete) {
+    $progress = $null
+    try {
+        $progress = New-Object System.Windows.Forms.Form
+        $progress.Text = 'presale-wiper - đang xoá'
+        $progress.Width = 520
+        $progress.Height = 130
+        $progress.StartPosition = 'CenterScreen'
+        $progress.FormBorderStyle = 'FixedDialog'
+        $progress.MaximizeBox = $false
+        $progress.MinimizeBox = $false
+        $label = New-Object System.Windows.Forms.Label
+        $label.Left = 16; $label.Top = 14; $label.Width = 480; $label.Text = 'Đang chuẩn bị...'
+        $bar = New-Object System.Windows.Forms.ProgressBar
+        $bar.Left = 16; $bar.Top = 44; $bar.Width = 480; $bar.Height = 22
+        $bar.Minimum = 0; $bar.Maximum = [Math]::Max(1, $willDelete.Count)
+        [void]$progress.Controls.Add($label)
+        [void]$progress.Controls.Add($bar)
+        $progress.Show()
+        $progress.Refresh()
+    } catch { $progress = $null }
+
+    for ($i = 0; $i -lt $willDelete.Count; $i++) {
+        $path = $willDelete[$i]
         try {
-            [System.IO.File]::Delete((To-Long $item.Path))
-            [void]$deleted.Add($item)
+            [System.IO.File]::Delete((To-Long $path))
+            $deleted++
         } catch {
-            [void]$failed.Add([PSCustomObject]@{ Path = $item.Path; Reason = $_.Exception.Message; Size = $item.Size })
+            [void]$failed.Add([PSCustomObject]@{ Path = $path; Reason = $_.Exception.Message })
+        }
+
+        if ($null -ne $progress -and ($i % 25 -eq 0 -or $i -eq $willDelete.Count - 1)) {
+            try {
+                $bar.Value = [Math]::Min($bar.Maximum, $i + 1)
+                $label.Text = ('Đã xoá {0}/{1} file' -f ($i + 1), $willDelete.Count)
+                $progress.Refresh()
+            } catch { }
         }
     }
+
+    # Dọn thư mục: file đã sắp theo độ sâu nên xoá xong file thì thư mục rỗng dần.
+    for ($i = 0; $i -lt $dirsToRemove.Count; $i++) {
+        try {
+            [System.IO.Directory]::Delete((To-Long $dirsToRemove[$i]), $false)
+            $removedDirs++
+        } catch {
+            # Còn file lạ hoặc bị khoá: để lại, không phải lỗi nghiêm trọng.
+        }
+        if ($null -ne $progress -and ($i % 25 -eq 0 -or $i -eq $dirsToRemove.Count - 1)) {
+            try {
+                $label.Text = ('Đã xoá {0} file, dọn {1}/{2} thư mục' -f $deleted, ($i + 1), $dirsToRemove.Count)
+                $progress.Refresh()
+            } catch { }
+        }
+    }
+
+    if ($null -ne $progress) {
+        try { $progress.Close(); $progress.Dispose() } catch { }
+    }
 }
 
-$doneBytes = 0L
-foreach ($item in $deleted) { $doneBytes += $item.Size }
-
+# -----------------------------------------------------------------------------
+# 8. Báo cáo
+# -----------------------------------------------------------------------------
+$mode = if ($Execute) { 'delete' } else { 'dry-run' }
+$baseName = if ($Execute) { 'da-xoa' } else { 'ke-hoach-xoa' }
+$stamp = '{0}-{1}' -f $baseName, $script:RunId
+$txtPath = Join-Path $destination "$stamp.txt"
+$jsonPath = Join-Path $destination "$stamp.json"
 $noBom = New-Object System.Text.UTF8Encoding($false)
-$writer = New-Object System.IO.StreamWriter ((To-Long $txtPath), $false, $noBom)
-try {
-    if ($Execute) {
-        $writer.WriteLine('# presale-wiper - ĐÃ XOÁ VĨNH VIỄN (không hoàn tác được)')
-    } else {
-        $writer.WriteLine('# presale-wiper - KẾ HOẠCH XOÁ (mô phỏng, CHƯA xoá gì)')
-    }
-    $writer.WriteLine("# Tạo lúc: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    $writer.WriteLine("# Nguồn: $planPath")
-    $writer.WriteLine("# Sẽ xoá / đã xoá: $($willDelete.Count) file, $(Format-Bytes $totalBytes)")
-    if ($Execute) { $writer.WriteLine("# Xoá thành công: $($deleted.Count) | Lỗi: $($failed.Count)") }
-    $writer.WriteLine("# Bỏ qua (guard): $($skipped.Count) file")
-    $writer.WriteLine('')
-    foreach ($item in $willDelete) { $writer.WriteLine($item.Path) }
-    if ($skipped.Count -gt 0) {
-        $writer.WriteLine('')
-        $writer.WriteLine('# --- BỎ QUA ---')
-        foreach ($item in $skipped) { $writer.WriteLine(('# {0}  [{1}]' -f $item.Path, $item.Reason)) }
-    }
-} finally {
-    $writer.Dispose()
-}
 
-$rows = @($willDelete | ForEach-Object {
-        [PSCustomObject]@{ Path = $_.Path; SizeBytes = $_.Size; Kind = $_.Kind; Action = $mode }
-    })
-$rows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
+$lines = New-Object 'System.Collections.Generic.List[string]'
+if ($Execute) {
+    $lines.Add('# presale-wiper - ĐÃ XOÁ VĨNH VIỄN (không hoàn tác được)')
+} else {
+    $lines.Add('# presale-wiper - KẾ HOẠCH XOÁ (mô phỏng, chưa xoá gì)')
+}
+$lines.Add("# Tạo lúc: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+$lines.Add("# Nguồn: $filesSource")
+$lines.Add("# File: $($willDelete.Count) | Thư mục: $($dirsToRemove.Count) | Bỏ qua: $($skipped.Count)")
+if ($Execute) { $lines.Add("# Đã xoá: $deleted file, $removedDirs thư mục | Lỗi: $($failed.Count)") }
+$lines.Add('')
+foreach ($item in $willDelete) { $lines.Add($item) }
+if ($dirsToRemove.Count -gt 0) {
+    $lines.Add('')
+    $lines.Add('# --- THƯ MỤC ---')
+    foreach ($item in $dirsToRemove) { $lines.Add($item) }
+}
+if ($skipped.Count -gt 0) {
+    $lines.Add('')
+    $lines.Add('# --- BỎ QUA ---')
+    foreach ($item in $skipped) { $lines.Add(('# [{0}] {1}' -f $item.Reason, $item.Path)) }
+}
+[System.IO.File]::WriteAllLines((To-Long $txtPath), $lines.ToArray(), $noBom)
 
 $summary = [ordered]@{
     tool        = 'presale-wiper remove-once'
     mode        = $mode
-    source      = $planPath
+    source      = $filesSource
     generatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-    candidates  = $willDelete.Count
+    files       = $willDelete.Count
+    directories = $dirsToRemove.Count
     skipped     = $skipped.Count
     sizeBytes   = $totalBytes
     sizeText    = Format-Bytes $totalBytes
-    deleted     = if ($Execute) { $deleted.Count } else { 0 }
-    failed      = if ($Execute) { $failed.Count } else { 0 }
-    limits      = [ordered]@{ maxFiles = $MaxFiles; maxBytes = $MaxBytes }
-    files       = @($willDelete | ForEach-Object { [ordered]@{ path = $_.Path; sizeBytes = $_.Size; kind = $_.Kind } })
-    skippedList = @($skipped | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
+    deleted     = $deleted
+    removedDirs = $removedDirs
+    failed      = $failed.Count
     failedList  = @($failed | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
+    skippedList = @($skipped | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
 }
 [System.IO.File]::WriteAllText((To-Long $jsonPath), (ConvertTo-Json -InputObject $summary -Depth 6), $noBom)
 
-if (-not $Quiet) {
-    Write-Line ''
-    Write-Line ('=' * 76)
-    if ($Execute) {
-        Write-Line '  presale-wiper - XOÁ VĨNH VIỄN'
-    } else {
-        Write-Line '  presale-wiper - KẾ HOẠCH XOÁ (mô phỏng, chưa xoá gì)'
+Write-Line ''
+Write-Line ('=' * 76)
+if ($Execute) {
+    Write-Line '  ĐÃ XOÁ XONG'
+} else {
+    Write-Line '  CHƯA XOÁ GÌ (chế độ mô phỏng)'
+}
+Write-Line ('=' * 76)
+if ($Execute) {
+    Write-Line ("  File đã xoá     : {0}  ({1})" -f $deleted, (Format-Bytes $totalBytes))
+    Write-Line ("  Thư mục đã dọn  : {0}" -f $removedDirs)
+    Write-Line ("  Lỗi             : {0}" -f $failed.Count)
+    foreach ($item in @($failed | Select-Object -First 20)) {
+        Write-Error-Line ("    [{0}] {1}" -f $item.Reason, $item.Path)
     }
-    Write-Line ('=' * 76)
+} else {
+    Write-Line ("  Sẽ xoá          : {0} file  ({1})" -f $willDelete.Count, (Format-Bytes $totalBytes))
+    Write-Line ("  Sẽ dọn          : {0} thư mục" -f $dirsToRemove.Count)
     Write-Line ''
-    Write-Line ("  Nguồn danh sách : {0}" -f $planPath)
-    Write-Line ("  Sẽ xử lý        : {0} file, {1}" -f $willDelete.Count, (Format-Bytes $totalBytes))
-    Write-Line ("  Bỏ qua (guard)  : {0} file" -f $skipped.Count)
-    if ($Execute) {
-        Write-Line ("  Đã xoá          : {0} file, {1}" -f $deleted.Count, (Format-Bytes $doneBytes))
-        Write-Line ("  Lỗi             : {0} file" -f $failed.Count)
+    Write-Line '  Muốn xoá thật, chạy lại với: -Execute -ConfirmToken XOA'
+}
+Write-Line ''
+Write-Line ("  Báo cáo: {0}" -f $txtPath)
+Write-Line ''
+
+if (-not $Execute -and -not $Quiet -and ((-not $FromScan) -or ($env:PSW_ASK_DELETE -eq '1'))) {
+    $interactive = (-not [Console]::IsInputRedirected) -or ($env:PSW_ASK_DELETE -eq '1')
+    if ($interactive) {
+        Write-Line 'Ấn Enter để xoá thật, đóng cửa sổ để huỷ.'
+        $null = [Console]::ReadLine()
+        $recurse = @{ Plan = $planDir; Execute = $true; ConfirmToken = 'XOA' }
+        if ($Keep.Count -gt 0) { $recurse['Keep'] = $Keep }
+        & $PSCommandPath @recurse
     }
-    Write-Line ''
-    Write-Line '  File kế hoạch:'
-    Write-Line ("    TXT  : {0}" -f $txtPath)
-    Write-Line ("    CSV  : {0}" -f $csvPath)
-    Write-Line ("    JSON : {0}" -f $jsonPath)
-    Write-Line ''
-    if ($Execute) {
-        Write-Line 'Xong. Không khôi phục được những file đã xoá.'
-    } else {
-        Write-Line 'Chưa có file nào bị xoá. Đọc file TXT, rồi chạy lại với:'
-        Write-Line "  -Execute -ConfirmToken XOA"
-    }
-    Write-Line ''
 }
 
+if ($FromScan) { return }
 [Environment]::ExitCode = 0

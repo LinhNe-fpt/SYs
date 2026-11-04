@@ -88,6 +88,11 @@ nguyên thư mục, chỉ các mục con. Thêm `-DevFoldersOnly` để chỉ qu
 Quét profile của người dùng khác cần chạy bằng quyền admin; không có quyền thì
 các thư mục đó bị bỏ qua.
 
+Quét xong, kết quả in ra **toàn bộ** (không còn kiểu "... và N mục khác"), chữ
+màu xanh lá. Ấn **Enter** để chuyển sang `remove-once.ps1`: bước này in kế
+hoạch xoá (đủ từng file, từng thư mục) và **chưa xoá gì**; ấn Enter lần nữa mới
+xoá thật. Đóng cửa sổ ở bất kỳ bước nào là huỷ.
+
 ## Dọn file theo danh sách: `remove-once.ps1`
 
 Tiêu thụ danh sách của `scan-once.ps1`. **Mặc định chỉ mô phỏng, không xoá gì**:
@@ -107,7 +112,10 @@ Xoá thật chỉ khi gõ đủ cả hai:
 .\remove-once.ps1 -Execute -ConfirmToken XOA
 ```
 
-Xoá vĩnh viễn là **không hoàn tác được**. Chế độ `-Execute` từ chối chạy nếu:
+Xoá vĩnh viễn là **không hoàn tác được**. Khi xoá, công cụ xoá cả file **và**
+các thư mục của target (con trước cha), nên thư mục project không còn lại vỏ
+rỗng; thư mục nào còn file lạ hoặc bị khoá thì được giữ lại. Chế độ `-Execute`
+từ chối chạy nếu:
 
 - thiếu `-ConfirmToken XOA`
 - vượt `-MaxFiles` (mặc định 20.000) hoặc `-MaxBytes` (mặc định 20 GB)

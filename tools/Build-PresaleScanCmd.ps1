@@ -12,8 +12,8 @@
     ngay; quét xong tự mở thư mục kết quả trong Explorer. Lỗi (nếu có) hiện bằng
     hộp thoại. Tiến trình vẫn thấy trong Task Manager (powershell.exe).
 
-    -Visible: bản có cửa sổ console, in tổng kết rồi tự đóng sau
-    -CloseAfterSeconds giây (dùng khi cần xem log).
+    -Visible: bản có cửa sổ console, in kết quả màu xanh lá, chờ Enter để
+    chuyển sang bước xoá (mô phỏng trước; xoá thật cần Enter lần nữa).
 
 .EXAMPLE
     .\tools\Build-PresaleScanCmd.ps1
@@ -31,19 +31,20 @@ $ErrorActionPreference = 'Stop'
 
 # cmd.exe cần CRLF và KHÔNG được có BOM (BOM làm hỏng dòng đầu).
 # Dot-source (không phải '&') để biến cấp script nằm đúng scope $script:.
-$run = '. ([ScriptBlock]::Create([IO.File]::ReadAllText($env:PSW_SELF, [Text.Encoding]::UTF8))) %*'
+$run = '. ([ScriptBlock]::Create([IO.File]::ReadAllText($env:PSW_SELF, [Text.Encoding]::UTF8))) %* -AskDelete'
 
 $header = if ($Visible) {
     @'
 <# : batch
 @echo off
-rem presale-wiper: quet TOAN BO PC, chi liet ke, KHONG XOA GI.
+rem presale-wiper: quet TOAN BO PC, in ket qua, Enter de chuyen sang buoc xoa.
 chcp 65001 >nul
 set "PSW_SELF=%~f0"
-set "PSW_OPEN_RESULT=1"
+set "PSW_OPEN_RESULT=0"
+set "PSW_ASK_DELETE=1"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "__RUN__"
 echo.
-echo Cua so se tu dong sau __SECONDS__ giay. Ket qua da mo trong Explorer.
+echo Da xong. Cua so se tu dong sau __SECONDS__ giay.
 timeout /t __SECONDS__ /nobreak >nul
 exit /b
 #>
@@ -57,6 +58,7 @@ rem presale-wiper: quet TOAN BO PC chay an, chi liet ke, KHONG XOA GI.
 set "PSW_SELF=%~f0"
 set "PSW_OPEN_RESULT=1"
 set "PSW_HIDDEN=1"
+set "PSW_ASK_DELETE=1"
 start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "__RUN__"
 exit /b
 #>
@@ -67,7 +69,21 @@ $header = $header.Replace('__RUN__', $run).Replace('__SECONDS__', [string]$Close
 $body = [IO.File]::ReadAllText($Source, [Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
 $body = $body -replace '^#Requires[^\r\n]*\r?\n', ''
 
-$text = ($header + "`n" + $body) -replace "`r?`n", "`r`n"
+# Nhúng remove-once.ps1 vào cuối file (Base64) để presale-scan.cmd tự đủ:
+# không cần mang theo file .ps1 nào khác.
+$removePath = Join-Path (Split-Path -Parent $PSScriptRoot) 'remove-once.ps1'
+$embedded = ''
+if ([System.IO.File]::Exists($removePath)) {
+    $removeBytes = [IO.File]::ReadAllBytes($removePath)
+    $encoded = [Convert]::ToBase64String($removeBytes)
+    $builder = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt $encoded.Length; $i += 120) {
+        [void]$builder.AppendLine('# ' + $encoded.Substring($i, [Math]::Min(120, $encoded.Length - $i)))
+    }
+    $embedded = "`r`n# PSW_REMOVE_BASE64_BEGIN`r`n" + $builder.ToString() + '# PSW_REMOVE_BASE64_END' + "`r`n"
+}
+
+$text = ($header + "`n" + $body + $embedded) -replace "`r?`n", "`r`n"
 [IO.File]::WriteAllText($Destination, $text, (New-Object System.Text.UTF8Encoding($false)))
 
 Get-Item -LiteralPath $Destination

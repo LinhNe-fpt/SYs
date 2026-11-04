@@ -45,6 +45,10 @@
 .PARAMETER IncludeHome
     Giữ để tương thích, không còn tác dụng (home đã được quét mặc định).
 
+.PARAMETER AskDelete
+    Sau khi in kết quả, in hết danh sách rồi chờ Enter; Enter chuyển sang
+    remove-once.ps1 (mô phỏng trước, xoá thật cần Enter lần nữa).
+
 .PARAMETER Quiet
     Chỉ in tổng kết, không in bảng chi tiết.
 
@@ -80,6 +84,8 @@ param(
     [switch]$DevFoldersOnly,
 
     [switch]$IncludeHome,
+
+    [switch]$AskDelete,
 
     [switch]$Quiet
 )
@@ -433,6 +439,17 @@ function ConvertTo-Bytes {
     return [long]($number * [Math]::Pow(1024, $power))
 }
 
+function Write-Green {
+    param([string]$Text)
+    $previous = [Console]::ForegroundColor
+    try {
+        [Console]::ForegroundColor = [ConsoleColor]::Green
+        [Console]::Out.WriteLine($Text)
+    } finally {
+        [Console]::ForegroundColor = $previous
+    }
+}
+
 function Write-Stdout {
     param([string]$Text)
     [Console]::Out.WriteLine($Text)
@@ -705,8 +722,13 @@ function Expand-Target {
 
     $paths = New-Object 'System.Collections.Generic.List[string]'
     $sizes = New-Object 'System.Collections.Generic.List[long]'
+    $dirs = New-Object 'System.Collections.Generic.List[string]'
     $stack = New-Object 'System.Collections.Generic.Stack[string]'
     $stack.Push((To-LongPath $Value))
+    # Chính target cũng phải nằm trong danh sách thư mục, nếu không sau khi xoá
+    # file thì vỏ thư mục project vẫn còn lại.
+    $self = From-LongPath (To-LongPath $Value)
+    if ([System.IO.Directory]::Exists((To-LongPath $Value))) { $dirs.Add($self) }
 
     $dirFlag = [int][System.IO.FileAttributes]::Directory
     $reparseFlag = [int][System.IO.FileAttributes]::ReparsePoint
@@ -723,7 +745,14 @@ function Expand-Target {
 
                 $attributes = [int]$child.Attributes
                 if (($attributes -band $reparseFlag) -ne 0) { continue }
-                if (($attributes -band $dirFlag) -ne 0) { $stack.Push($child.FullName); continue }
+                if (($attributes -band $dirFlag) -ne 0) {
+                    $dirPath = $child.FullName
+                    if ($dirPath.StartsWith('\\?\UNC\')) { $dirPath = '\\' + $dirPath.Substring(8) }
+                    elseif ($dirPath.StartsWith('\\?\')) { $dirPath = $dirPath.Substring(4) }
+                    $dirs.Add($dirPath)
+                    $stack.Push($child.FullName)
+                    continue
+                }
 
                 $length = $child.Length
                 $total += $length
@@ -738,7 +767,7 @@ function Expand-Target {
         } catch { }
     }
 
-    return @{ Size = $total; Paths = $paths; Sizes = $sizes; Truncated = $truncated }
+    return @{ Size = $total; Paths = $paths; Sizes = $sizes; Dirs = $dirs; Truncated = $truncated }
 }
 
 function New-ScanTarget {
@@ -757,6 +786,7 @@ function New-ScanTarget {
         Blocked   = Get-BlockReason $Path
         Paths     = $Expanded.Paths
         Sizes     = $Expanded.Sizes
+        Dirs      = $Expanded.Dirs
         Truncated = [bool]$Expanded.Truncated
     }
 }
@@ -958,6 +988,7 @@ function Invoke-Scan {
                     Size      = $size
                     Paths     = [System.Collections.Generic.List[string]]::new()
                     Sizes     = [System.Collections.Generic.List[long]]::new()
+                    Dirs      = [System.Collections.Generic.List[string]]::new()
                     Truncated = $false
                 }
                 $single.Paths.Add($childPath)
@@ -1049,6 +1080,8 @@ function Out-Report {
     $txtPath = Join-PathSafe $Destination ("danh-sach-file-{0}.txt" -f $script:RunId)
     $csvPath = Join-PathSafe $Destination ("danh-sach-file-{0}.csv" -f $script:RunId)
     $jsonPath = Join-PathSafe $Destination ("danh-sach-file-{0}.json" -f $script:RunId)
+    # Thư mục của từng target, sắp theo độ dài giảm dần: xoá con trước cha.
+    $dirsPath = Join-PathSafe $Destination ("danh-sach-thu-muc-{0}.txt" -f $script:RunId)
 
     $noBom = New-Object System.Text.UTF8Encoding($false)
     $withBom = New-Object System.Text.UTF8Encoding($true)
@@ -1101,6 +1134,19 @@ function Out-Report {
         }
         $json.WriteLine('  ],')
 
+        # Danh sách thư mục của từng target: remove-once.ps1 dùng để dọn thư mục
+        # rỗng sau khi xoá file (nếu không, cây thư mục project vẫn còn nguyên).
+        $json.WriteLine('  "targetDirs": [')
+        for ($i = 0; $i -lt $targets.Count; $i++) {
+            $target = $targets[$i]
+            $separator = if ($i -lt $targets.Count - 1) { ',' } else { '' }
+            $json.WriteLine('    {"path": ' + (ConvertTo-JsonString $target.Path) +
+                ', "kind": "' + $target.Kind + '", "dirs": [' +
+                ((@($target.Dirs) | ForEach-Object { ConvertTo-JsonString $_ }) -join ', ') + ']}' + $separator)
+        }
+        $json.WriteLine('  ],')
+
+
         # Đường dẫn Windows không chứa ký tự điều khiển, nên chỉ cần thoát \ và ".
         $csvReason = New-Object 'string[]' $kindTargets.Count
         $jsonKind = New-Object 'string[]' $kindTargets.Count
@@ -1129,7 +1175,7 @@ function Out-Report {
             $separator = if ($i -gt 0) { ',' } else { '' }
             $json.WriteLine('    {"path": "' + $path.Replace('\', '\\').Replace('"', '\"') + '", "sizeBytes": ' + $size + $jsonKind[$fileOwner[$index]] + $separator)
 
-            if ($topFiles.Count -lt 15) { [void]$topFiles.Add([PSCustomObject]@{ Path = $path; Size = $size }) }
+            if ($topFiles.Count -lt 200) { [void]$topFiles.Add([PSCustomObject]@{ Path = $path; Size = $size }) }
         }
         $json.WriteLine('  ],')
 
@@ -1142,6 +1188,27 @@ function Out-Report {
         }
         $json.WriteLine('  ]')
         $json.WriteLine('}')
+
+        # --- TXT thư mục: mỗi target kèm cây thư mục của nó ---
+        $dirLines = New-Object 'System.Collections.Generic.List[string]'
+        $allDirs = New-Object 'System.Collections.Generic.List[string]'
+        foreach ($target in $targets) {
+            foreach ($dir in @($target.Dirs)) {
+                if ([string]::IsNullOrWhiteSpace($dir)) { continue }
+                if ($allDirs.Contains($dir)) { continue }
+                $allDirs.Add($dir)
+            }
+        }
+        $sortedDirs = $allDirs.ToArray()
+        # Sắp xếp bằng mảng khóa độ dài (giảm dần) - nhanh hơn Sort-Object nhiều.
+        $dirKeys = New-Object 'int[]' $sortedDirs.Count
+        for ($i = 0; $i -lt $sortedDirs.Count; $i++) { $dirKeys[$i] = -$sortedDirs[$i].Length }
+        if ($sortedDirs.Count -gt 1) { [Array]::Sort($dirKeys, $sortedDirs, [System.StringComparer]::OrdinalIgnoreCase) }
+        $dirLines.Add('# presale-wiper - thư mục thuộc các mục cần dọn (con trước cha)')
+        $dirLines.Add("# Số thư mục: $($sortedDirs.Count)")
+        $dirLines.Add('')
+        foreach ($dir in $sortedDirs) { $dirLines.Add($dir) }
+        [System.IO.File]::WriteAllLines((To-LongPath $dirsPath), $dirLines.ToArray(), $noBom)
     } finally {
         $txt.Dispose()
         $csv.Dispose()
@@ -1152,6 +1219,7 @@ function Out-Report {
         Txt       = $txtPath
         Csv       = $csvPath
         Json      = $jsonPath
+        Dirs      = $dirsPath
         Targets   = $targets
         FileCount = $count
         TopFiles  = $topFiles.ToArray()
@@ -1162,53 +1230,48 @@ function Out-Report {
 function Show-Summary {
     param($Report)
 
-    Write-Stdout ''
-    Write-Stdout ('=' * 76)
-    Write-Stdout '  presale-wiper - SCAN MỘT LẦN (chỉ liệt kê, KHÔNG xoá gì)'
-    Write-Stdout ('=' * 76)
+    # Không cắt bớt: hiện đủ mọi mục và mọi file lớn nhất, để tự thấy toàn bộ.
+    Write-Green ''
+    Write-Green ('=' * 76)
+    Write-Green '  presale-wiper - KẾT QUẢ SCAN (chỉ liệt kê, KHÔNG xoá gì)'
+    Write-Green ('=' * 76)
 
     if (-not $Quiet) {
-        $topTargets = @($Report.Targets | Select-Object -First 40)
-        if (@($topTargets).Count -gt 0) {
-            Write-Stdout ''
-            Write-Stdout '--- Mục lớn nhất ---'
-            Write-Stdout ("{0,-10} {1,12}  {2}" -f 'Loại', 'Dung lượng', 'Đường dẫn')
-            Write-Stdout ("{0,-10} {1,12}  {2}" -f ('-' * 10), ('-' * 12), ('-' * 50))
-            foreach ($target in $topTargets) {
-                $display = $target.Path
-                if ($display.Length -gt 96) { $display = '...' + $display.Substring($display.Length - 93) }
-                Write-Stdout ("{0,-10} {1,12}  {2}" -f $target.Kind, (Format-Size $target.Size), $display)
-            }
-            if (@($Report.Targets).Count -gt @($topTargets).Count) {
-                Write-Stdout ("  ... và {0} mục khác (xem file CSV)." -f (@($Report.Targets).Count - @($topTargets).Count))
+        $allTargets = @($Report.Targets)
+        if ($allTargets.Count -gt 0) {
+            Write-Green ''
+            Write-Green ("--- Tất cả mục cần dọn ({0}) ---" -f $allTargets.Count)
+            Write-Green ("{0,-10} {1,12}  {2}" -f 'Loại', 'Dung lượng', 'Đường dẫn')
+            Write-Green ("{0,-10} {1,12}  {2}" -f ('-' * 10), ('-' * 12), ('-' * 50))
+            foreach ($target in $allTargets) {
+                Write-Green ("{0,-10} {1,12}  {2}" -f $target.Kind, (Format-Size $target.Size), $target.Path)
             }
         }
 
-        $topFiles = @($Report.TopFiles)
-        if (@($topFiles).Count -gt 0) {
-            Write-Stdout ''
-            Write-Stdout '--- File lớn nhất ---'
-            foreach ($file in $topFiles) {
-                $display = $file.Path
-                if ($display.Length -gt 96) { $display = '...' + $display.Substring($display.Length - 93) }
-                Write-Stdout ("{0,12}  {1}" -f (Format-Size $file.Size), $display)
+        $allFiles = @($Report.TopFiles)
+        if ($allFiles.Count -gt 0) {
+            Write-Green ''
+            Write-Green ("--- File lớn nhất ({0}) ---" -f $allFiles.Count)
+            foreach ($file in $allFiles) {
+                Write-Green ("{0,12}  {1}" -f (Format-Size $file.Size), $file.Path)
             }
         }
     }
 
-    Write-Stdout ''
-    Write-Stdout '--- Tổng kết ---'
-    Write-Stdout ("  Mục (project/devdir/secret) : {0}" -f @($Report.Targets).Count)
-    Write-Stdout ("  File cụ thể                 : {0}" -f $Report.FileCount)
-    Write-Stdout ("  Tổng dung lượng             : {0}" -f (Format-Size $Report.TotalSize))
-    Write-Stdout ''
-    Write-Stdout '--- File kết quả ---'
-    Write-Stdout ("  TXT  (danh sách path) : {0}" -f $Report.Txt)
-    Write-Stdout ("  CSV  (chi tiết)       : {0}" -f $Report.Csv)
-    Write-Stdout ("  JSON (cho tooling)    : {0}" -f $Report.Json)
-    Write-Stdout ''
-    Write-Stdout 'KHÔNG có file nào bị xoá. Đọc danh sách rồi tự quyết định.'
-    Write-Stdout ''
+    Write-Green ''
+    Write-Green '--- Tổng kết ---'
+    Write-Green ("  Mục (project/devdir/secret) : {0}" -f @($Report.Targets).Count)
+    Write-Green ("  File cụ thể                 : {0}" -f $Report.FileCount)
+    Write-Green ("  Tổng dung lượng             : {0}" -f (Format-Size $Report.TotalSize))
+    Write-Green ''
+    Write-Green '--- File kết quả ---'
+    Write-Green ("  TXT  (danh sách path) : {0}" -f $Report.Txt)
+    Write-Green ("  CSV  (chi tiết)       : {0}" -f $Report.Csv)
+    Write-Green ("  JSON (cho tooling)    : {0}" -f $Report.Json)
+    Write-Green ("  DIRS (thư mục)        : {0}" -f $Report.Dirs)
+    Write-Green ''
+    Write-Green 'CHƯA có file nào bị xoá.'
+    Write-Green ''
 }
 
 # =============================================================================
@@ -1278,11 +1341,66 @@ if ($env:PSW_OPEN_RESULT -eq '1') {
 }
 
 if (@($scanResult.Notes).Count -gt 0) {
-    Write-Stdout ("Ghi chú ({0}):" -f @($scanResult.Notes).Count)
+    Write-Green ("Ghi chú ({0}):" -f @($scanResult.Notes).Count)
     foreach ($note in @($scanResult.Notes | Select-Object -First 10)) {
-        Write-Stdout ("  - {0}: {1}" -f $note.Path, $note.Note)
+        Write-Green ("  - {0}: {1}" -f $note.Path, $note.Note)
     }
-    Write-Stdout ''
+    Write-Green ''
+}
+
+function Get-RemoveScriptPath {
+    <#
+        Tìm remove-once.ps1. presale-scan.cmd là file duy nhất: nội dung
+        remove-once.ps1 được nhúng Base64 ở cuối file, giải nén ra temp khi cần.
+    #>
+    # $PSScriptRoot rỗng khi mã chạy trong ScriptBlock (presale-scan.cmd): chỉ
+    # dùng khi thật sự có, tránh Join-Path với base rỗng.
+    if (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) {
+        $sibling = Join-Path $PSScriptRoot 'remove-once.ps1'
+        if ([System.IO.File]::Exists($sibling)) { return $sibling }
+    }
+
+    $self = $env:PSW_SELF
+    if ([string]::IsNullOrWhiteSpace($self) -or -not [System.IO.File]::Exists($self)) { return $null }
+
+    $begin = '# PSW_REMOVE_BASE64_BEGIN'
+    $end = '# PSW_REMOVE_BASE64_END'
+    $text = [System.IO.File]::ReadAllText($self, [System.Text.Encoding]::UTF8)
+    # Tìm ở dạng dòng chú thích: chuỗi trần cũng xuất hiện trong chính hàm này.
+    $startIndex = $text.LastIndexOf($begin, [StringComparison]::Ordinal)
+    if ($startIndex -lt 0) { return $null }
+    $endIndex = $text.LastIndexOf($end, [StringComparison]::Ordinal)
+    if ($endIndex -le $startIndex) { return $null }
+
+    $payload = $text.Substring($startIndex + $begin.Length, $endIndex - $startIndex - $begin.Length)
+    # Mỗi dòng base64 được ghi kèm tiền tố '# ' để cả file vẫn là comment hợp lệ
+    # khi PowerShell parse; bỏ tiền tố đó rồi nối lại.
+    $payload = ($payload -split "`r?`n" |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ } |
+            ForEach-Object { if ($_.StartsWith('#')) { $_.Substring(1).Trim() } else { $_ } }) -join ''
+    $bytes = [Convert]::FromBase64String($payload)
+
+    $target = Join-Path ([System.IO.Path]::GetTempPath()) ("presale-remove-{0}.ps1" -f $script:RunId)
+    [System.IO.File]::WriteAllBytes($target, $bytes)
+    return $target
+}
+
+# Ở lại chờ Enter để người dùng kịp đọc kết quả. Có console thật (double-click)
+# hoặc được presale-scan.cmd yêu cầu rõ bằng -AskDelete thì mới hỏi.
+    $interactive = $AskDelete -or (-not [Console]::IsInputRedirected -and $env:PSW_NO_PAUSE -ne '1')
+if ($interactive) {
+    Write-Green 'Ấn Enter để chuyển sang bước xoá (hoặc đóng cửa sổ để dừng, chưa xoá gì).'
+    $null = [Console]::ReadLine()
+    try {
+        $removeScript = Get-RemoveScriptPath
+        if ([string]::IsNullOrWhiteSpace($removeScript)) {
+            throw 'Không tìm thấy remove-once.ps1 (hãy để cùng thư mục, hoặc dùng presale-scan.cmd bản mới).'
+        }
+        & $removeScript -Plan (Split-Path -Parent $report.Json) -FromScan
+    } catch {
+        Write-Green ("LỖI khi mở bước xoá: {0}" -f $_.Exception.Message)
+    }
 }
 
 [Environment]::ExitCode = 0
