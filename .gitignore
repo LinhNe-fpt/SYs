@@ -19,5 +19,6 @@ tests/.sandbox/
 Thumbs.db
 Desktop.ini
 
-# Bản đóng gói, tạo bằng tools/Build-PresaleScanCmd.ps1
-presale-scan.cmd
+# Bản đóng gói: sinh bằng tools/Build-PresaleScanCmd.ps1.
+# CỐ Ý commit để tải trực tiếp từ GitHub (không cần build lại).
+# Nhớ chạy lại build mỗi khi scan-once.ps1 / remove-once.ps1 thay đổi.

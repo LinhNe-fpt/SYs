@@ -16,6 +16,11 @@
 *.cmd   text eol=crlf
 *.bat   text eol=crlf
 
+# File .cmd đóng gói (chứa batch header + Base64 nhúng) phải giữ NGUYÊN từng
+# byte: git chuẩn hoá line ending sẽ làm hỏng dòng batch đầu và khối Base64.
+# 'binary' = -text -diff -merge, tức git không đụng vào nội dung.
+presale-scan.cmd binary
+
 *.md    text eol=lf
 *.yml   text eol=lf
 *.yaml  text eol=lf
