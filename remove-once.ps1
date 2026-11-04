@@ -175,8 +175,12 @@ foreach ($name in @('Windows', 'Windows.old', 'Program Files', 'Program Files (x
 }
 
 $script:CriticalFiles = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+# Chỉ file mà việc xoá có thể làm hỏng/hỏng hệ thống.
+# 'thumbs.db' và 'desktop.ini' KHÔNG nằm ở đây: chúng chỉ là cache/metadata do
+# Windows tự sinh lại, và trước đây bị chặn nên sau khi xoá project vẫn còn
+# sót 2 file, khiến thư mục project không xoá được.
 foreach ($name in @('pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'bootmgr', 'BOOTNXT', 'ntldr',
-        'ntdetect.com', 'desktop.ini', 'thumbs.db', 'boot.ini', 'io.sys', 'msdos.sys',
+        'ntdetect.com', 'boot.ini', 'io.sys', 'msdos.sys',
         'autoexec.bat', 'config.sys')) {
     [void]$script:CriticalFiles.Add($name)
 }
@@ -463,12 +467,23 @@ if ($Execute) {
 
     for ($i = 0; $i -lt $willDelete.Count; $i++) {
         $path = $willDelete[$i]
+        $long = To-Long $path
+        $ok = $false
         try {
-            [System.IO.File]::Delete((To-Long $path))
-            $deleted++
+            [System.IO.File]::Delete($long)
+            $ok = $true
         } catch {
-            [void]$failed.Add([PSCustomObject]@{ Path = $path; Reason = $_.Exception.Message })
+            # Windows hay khoá thumbs.db / desktop.ini và file chỉ-đọc. Bỏ
+            # thuộc tính rồi thử lại một lần trước khi coi là lỗi.
+            try {
+                [System.IO.File]::SetAttributes($long, [System.IO.FileAttributes]::Normal)
+                [System.IO.File]::Delete($long)
+                $ok = $true
+            } catch {
+                [void]$failed.Add([PSCustomObject]@{ Path = $path; Reason = $_.Exception.Message })
+            }
         }
+        if ($ok) { $deleted++ }
 
         if ($null -ne $progress -and ($i % 25 -eq 0 -or $i -eq $willDelete.Count - 1)) {
             try {
@@ -480,12 +495,15 @@ if ($Execute) {
     }
 
     # Dọn thư mục: file đã sắp theo độ sâu nên xoá xong file thì thư mục rỗng dần.
+    $leftoverDirs = New-Object 'System.Collections.Generic.List[string]'
     for ($i = 0; $i -lt $dirsToRemove.Count; $i++) {
         try {
             [System.IO.Directory]::Delete((To-Long $dirsToRemove[$i]), $false)
             $removedDirs++
         } catch {
-            # Còn file lạ hoặc bị khoá: để lại, không phải lỗi nghiêm trọng.
+            # Còn file lạ hoặc thư mục bị khoá: ghi lại để báo cho người dùng
+            # biết chính xác cái gì còn sót, thay vì im lặng bỏ qua.
+            $leftoverDirs.Add($dirsToRemove[$i])
         }
         if ($null -ne $progress -and ($i % 25 -eq 0 -or $i -eq $dirsToRemove.Count - 1)) {
             try {
@@ -527,6 +545,7 @@ $summary = [ordered]@{
     failed      = $failed.Count
     failedList  = @($failed | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
     skippedList = @($skipped | ForEach-Object { [ordered]@{ path = $_.Path; reason = $_.Reason } })
+    leftoverDirs = @($leftoverDirs)
 }
 [System.IO.File]::WriteAllText((To-Long $summaryPath), (ConvertTo-Json -InputObject $summary -Depth 6), $noBom)
 
@@ -544,6 +563,17 @@ if ($Execute) {
     Write-Line ("  Lỗi             : {0}" -f $failed.Count)
     foreach ($item in @($failed | Select-Object -First 20)) {
         Write-Error-Line ("    [{0}] {1}" -f $item.Reason, $item.Path)
+    }
+    # Nói rõ cái gì còn sót. Quan trọng: nếu file liệt kê đã xoá hết mà thư mục
+    # vẫn còn thì phải biết ngay, tránh tưởng đã dọn sạch.
+    if (@($leftoverDirs).Count -gt 0) {
+        Write-Line ''
+        Write-Line ("  Thư mục còn lại : {0} (bên trong còn file không xoá được)" -f @($leftoverDirs).Count)
+        foreach ($leftover in @($leftoverDirs | Select-Object -First 20)) {
+            $remain = 0
+            try { $remain = @([System.IO.Directory]::GetFileSystemEntries((To-Long $leftover))).Count } catch { }
+            Write-Error-Line ("    còn {0} mục: {1}" -f $remain, $leftover)
+        }
     }
 } else {
     Write-Line ("  Sẽ xoá          : {0} file  ({1})" -f $willDelete.Count, (Format-Bytes $totalBytes))
