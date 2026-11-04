@@ -1,20 +1,24 @@
 ﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    Quét một lần, xuất danh sách file cần dọn. KHÔNG XOÁ BẤT CỨ THỨ GÌ.
+    Quét PC và XOÁ LUÔN những file rác dev tìm thấy. Chạy là xoá, không hỏi.
 
 .DESCRIPTION
     Script độc lập, tự chứa: không import module, không cần Pester, không cần
-    quyền admin, không hỏi xác nhận. Chạy một lần rồi thoát.
+    quyền admin.
 
-    Nó làm đúng ba việc:
+    Nó làm bốn việc:
       1. Duyệt các thư mục dev, phân loại từng mục (project / rác dev / secret).
       2. Bung mỗi mục ra thành DANH SÁCH FILE cụ thể.
-      3. Ghi ra TXT + CSV + JSON và in bảng tổng kết.
+      3. Ghi ra báo cáo và in bảng tổng kết.
+      4. XOÁ VĨNH VIỄN các file đó (không vào Thùng rác), rồi dọn thư mục rỗng.
 
-    Trong file này KHÔNG có lệnh xoá nào. Không Remove-Item, không
-    [System.IO.File]::Delete, không [System.IO.Directory]::Delete. Nếu bạn
-    cần dọn, hãy đọc danh sách rồi tự quyết định.
+    XOÁ LÀ KHÔNG HOÀN TÁC ĐƯỢC. Muốn xem trước thì chạy với -DryRun.
+    Muốn tự tay xoá theo danh sách thì dùng -NoDelete rồi chạy remove-once.ps1.
+
+    Bộ guard vẫn giữ: không bao giờ xoá gốc ổ, C:\Windows, C:\Boot,
+    Program Files, ProgramData, AppData, thư mục người dùng (Desktop,
+    Documents, Downloads...), hay chính thư mục của công cụ này.
 
 .PARAMETER Path
     Thư mục cần quét. Bỏ trống thì quét TOÀN BỘ PC: gốc mọi ổ cố định (C:\, D:\,
@@ -48,9 +52,14 @@
 .PARAMETER IncludeHome
     Giữ để tương thích, không còn tác dụng (home đã được quét mặc định).
 
+.PARAMETER DryRun
+    Chỉ in danh sách, KHÔNG xoá. Bỏ trống thì chạy là xoá luôn.
+
+.PARAMETER NoDelete
+    Như -DryRun: quét, ghi báo cáo, không xoá.
+
 .PARAMETER AskDelete
-    Sau khi in kết quả, in hết danh sách rồi chờ Enter; Enter chuyển sang
-    remove-once.ps1 (mô phỏng trước, xoá thật cần Enter lần nữa).
+    Giữ để tương thích lệnh cũ, không còn tác dụng.
 
 .PARAMETER Quiet
     Chỉ in tổng kết, không in bảng chi tiết.
@@ -88,6 +97,12 @@ param(
 
     [switch]$IncludeHome,
 
+    # Chạy là xoá luôn: không cần xác nhận. Hai công tắc dưới để xem trước.
+    [switch]$DryRun,
+
+    [switch]$NoDelete,
+
+    # Giữ lại cho tương thích lệnh cũ; không còn tác dụng.
     [switch]$AskDelete,
 
     [switch]$Quiet
@@ -97,10 +112,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 # =============================================================================
-# 0. Cam kết: file này chỉ đọc
+# 0. Ranh giới trách nhiệm
 # =============================================================================
-# Đặt ở đây để bất kỳ ai đọc code cũng thấy ngay. Nếu bạn định thêm chức năng
-# xoá vào file này, hãy tạo file khác - giữ file này thuần read-only.
+# File này quét và gọi remove-once.ps1 để xoá. Mọi lệnh xoá thật nằm ở
+# remove-once.ps1 (xoá dưới đây chỉ là danh sách cần xoá, không xoá trực tiếp).
+# Bộ guard chặn đường dẫn hệ thống nằm ở cả hai file.
 
 $script:RunId = Get-Date -Format 'yyyyMMdd-HHmmss'
 
@@ -1385,7 +1401,7 @@ function Show-Summary {
     # Không cắt bớt: hiện đủ mọi mục và mọi file lớn nhất, để tự thấy toàn bộ.
     Write-Green ''
     Write-Green ('=' * 76)
-    Write-Green '  presale-wiper - KẾT QUẢ SCAN (chỉ liệt kê, KHÔNG xoá gì)'
+    Write-Green '  presale-wiper - KẾT QUẢ SCAN'
     Write-Green ('=' * 76)
 
     if (-not $Quiet) {
@@ -1429,7 +1445,11 @@ function Show-Summary {
                 $ideCount, $Report.IdeFileCount)
         Write-Green ''
     }
-    Write-Green 'CHƯA có file nào bị xoá.'
+    if ($Report.DryRun) {
+        Write-Green 'CHƯA có file nào bị xoá (chế độ chỉ xem).'
+    } else {
+        Write-Green 'Tiếp theo: XOÁ VĨNH VIỄN các mục trên.'
+    }
     Write-Green ''
 }
 
@@ -1531,6 +1551,8 @@ $scanResult.Roots = $roots
 $report = $null
 try {
     $report = Out-Report -Result $scanResult -Destination $destination
+    # Show-Summary cần biết có đang ở chế độ chỉ xem hay không để in đúng.
+    $report | Add-Member -NotePropertyName DryRun -NotePropertyValue ([bool]($DryRun -or $NoDelete)) -Force
 } catch {
     Write-Failure ("LỖI khi ghi kết quả: {0}" -f $_.Exception.Message)
     [Environment]::ExitCode = 2
@@ -1590,31 +1612,31 @@ function Get-RemoveScriptPath {
     return $target
 }
 
-# Ở lại chờ người dùng quyết định. Có console thật (double-click) hoặc được
-# presale-scan.cmd yêu cầu rõ bằng -AskDelete thì mới hỏi.
-$interactive = $AskDelete -or (-not [Console]::IsInputRedirected -and $env:PSW_NO_PAUSE -ne '1')
-if ($interactive) {
-    Write-Green 'Gõ XOA rồi Enter để XOÁ VĨNH VIỄN các mục trên.'
-    Write-Green '(Ấn Enter suông để dừng - chỉ xem danh sách, chưa xoá gì.)'
-    $answer = [Console]::ReadLine()
-    $askDelete = ($null -ne $answer -and $answer.Trim() -eq 'XOA')
-    if (-not $askDelete) {
-        Write-Green ''
-        Write-Green 'Đã dừng. Chưa xoá file nào.'
-    }
-
-    if ($askDelete) {
-        try {
-            $removeScript = Get-RemoveScriptPath
-            if ([string]::IsNullOrWhiteSpace($removeScript)) {
-                throw 'Không tìm thấy remove-once.ps1 (hãy để cùng thư mục, hoặc dùng presale-scan.cmd bản mới).'
-            }
-            # -Yes: đã xác nhận bằng chữ XOA ở trên, không hỏi lại lần nữa.
-            & $removeScript -Plan (Split-Path -Parent $report.Json) -FromScan -Execute -ConfirmToken XOA -Yes
-        } catch {
-            Write-Green ("LỖI khi mở bước xoá: {0}" -f $_.Exception.Message)
+# Chạy là xoá luôn. Không hỏi, không cần gõ gì thêm.
+# -DryRun: chỉ in danh sách, không xoá (dùng khi muốn xem trước).
+# -NoDelete: quét và ghi báo cáo nhưng dừng lại, không xoá.
+if ($DryRun -or $NoDelete) {
+    Write-Green ''
+    Write-Green 'CHẾ ĐỘ CHỈ XEM: không xoá file nào.'
+    Write-Green 'Bỏ -DryRun / -NoDelete là chạy sẽ xoá ngay.'
+} else {
+    try {
+        $removeScript = Get-RemoveScriptPath
+        if ([string]::IsNullOrWhiteSpace($removeScript)) {
+            throw 'Không tìm thấy remove-once.ps1 (hãy để cùng thư mục, hoặc dùng presale-scan.cmd bản mới).'
         }
+        # -Yes: chạy file là đã đồng ý xoá, không hỏi lại.
+        & $removeScript -Plan (Split-Path -Parent $report.Json) -FromScan -Execute -ConfirmToken XOA -Yes
+    } catch {
+        Write-Green ("LỖI khi mở bước xoá: {0}" -f $_.Exception.Message)
     }
+}
+
+if (-not $DryRun -and -not $NoDelete -and -not [Console]::IsInputRedirected) {
+    # Giữ cửa sổ lại để kịp đọc kết quả trước khi tự đóng.
+    Write-Green ''
+    Write-Green 'Xong. Ấn Enter để đóng cửa sổ.'
+    $null = [Console]::ReadLine()
 }
 
 [Environment]::ExitCode = 0

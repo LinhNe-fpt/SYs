@@ -31,13 +31,13 @@ $ErrorActionPreference = 'Stop'
 
 # cmd.exe cần CRLF và KHÔNG được có BOM (BOM làm hỏng dòng đầu).
 # Dot-source (không phải '&') để biến cấp script nằm đúng scope $script:.
-$run = '. ([ScriptBlock]::Create([IO.File]::ReadAllText($env:PSW_SELF, [Text.Encoding]::UTF8))) %* -AskDelete'
+$run = '. ([ScriptBlock]::Create([IO.File]::ReadAllText($env:PSW_SELF, [Text.Encoding]::UTF8))) %*'
 
 $header = if ($Visible) {
     @'
 <# : batch
 @echo off
-rem presale-wiper: quet TOAN BO PC, in ket qua, Enter de chuyen sang buoc xoa.
+rem presale-wiper: quet TOAN BO PC va XOA LUON nhung gi tim thay.
 chcp 65001 >nul
 set "PSW_SELF=%~f0"
 set "PSW_OPEN_RESULT=0"

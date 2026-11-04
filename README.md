@@ -57,8 +57,10 @@ file độc lập, không import module, không cần admin, không hỏi xác n
 Cách dễ nhất: **double-click `presale-scan.cmd`** — **một file duy nhất, tự đủ**:
 `scan-once.ps1` và `remove-once.ps1` đã được gộp vào (phần xoá nhúng Base64 ở
 cuối file), nên chỉ cần chép đúng 1 file, không cần mang theo `.ps1` nào.
-Tạo bằng `.\tools\Build-PresaleScanCmd.ps1 -Visible`. Quét xong in kết quả màu
-xanh lá, gõ `XOA` rồi Enter để xoá vĩnh viễn (Ấn Enter suông để dừng).
+Tạo bằng `.\tools\Build-PresaleScanCmd.ps1 -Visible`.
+
+**Chạy là xoá luôn** — không hỏi, không cần gõ xác nhận. Xoá vĩnh viễn, không
+vào Thùng rác. Muốn xem trước thì chạy `presale-scan.cmd -DryRun`.
 
 Nếu file được tải qua trình duyệt / Zalo / email, Windows gắn nhãn "từ
 Internet" và hỏi một lần trước khi chạy. Bỏ nhãn trước khi chạy: chuột phải
