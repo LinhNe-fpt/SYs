@@ -88,6 +88,37 @@ nguyên thư mục, chỉ các mục con. Thêm `-DevFoldersOnly` để chỉ qu
 Quét profile của người dùng khác cần chạy bằng quyền admin; không có quyền thì
 các thư mục đó bị bỏ qua.
 
+## Dọn file theo danh sách: `remove-once.ps1`
+
+Tiêu thụ danh sách của `scan-once.ps1`. **Mặc định chỉ mô phỏng, không xoá gì**:
+
+```powershell
+.\remove-once.ps1                                  # dùng presale-scan-* mới nhất
+.\remove-once.ps1 -Plan C:\Users\Admin\presale-scan-20261104-090000
+.\remove-once.ps1 -Keep '*\BOT\*','*\VPQL\*'       # loại trừ project muốn giữ
+```
+
+Kết quả ghi ra `ke-hoach-xoa-<thời gian>.txt/.csv/.json`, gồm danh sách file sẽ
+xoá và danh sách **bị bỏ qua kèm lý do** (guard).
+
+Xoá thật chỉ khi gõ đủ cả hai:
+
+```powershell
+.\remove-once.ps1 -Execute -ConfirmToken XOA
+```
+
+Xoá vĩnh viễn là **không hoàn tác được**. Chế độ `-Execute` từ chối chạy nếu:
+
+- thiếu `-ConfirmToken XOA`
+- vượt `-MaxFiles` (mặc định 20.000) hoặc `-MaxBytes` (mặc định 20 GB)
+- bất kỳ file nào nằm trong Windows / Program Files / ProgramData / AppData,
+  gốc ổ, thùng rác, thư mục hệ thống của ổ, hoặc thư mục chứa chính công cụ này
+- file hệ thống như `pagefile.sys`, `hiberfil.sys`, `bootmgr`
+
+Không có chế độ chạy nền dài ngày, không có cơ chế ẩn khỏi Task Manager. Nếu
+cần dọn định kỳ, hãy dùng Windows Task Scheduler với tác vụ hiển thị được và
+log đầy đủ; đừng chạy ở chế độ không ai giám sát.
+
 Kết quả ghi vào `%USERPROFILE%\presale-scan-<timestamp>\`:
 
 | File | Nội dung |
