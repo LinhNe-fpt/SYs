@@ -438,6 +438,19 @@ function Write-Stdout {
     [Console]::Out.WriteLine($Text)
 }
 
+function Write-Failure {
+    param([string]$Text)
+
+    Write-Stdout $Text
+    # presale-scan.cmd chạy ẩn (PSW_HIDDEN=1): không có console nên báo lỗi bằng hộp thoại.
+    if ($env:PSW_HIDDEN -eq '1') {
+        try {
+            Add-Type -AssemblyName System.Windows.Forms
+            [void][System.Windows.Forms.MessageBox]::Show($Text, 'presale-wiper scan')
+        } catch { }
+    }
+}
+
 # =============================================================================
 # 3. Guard: mục nào tuyệt đối không được liệt kê để xoá
 # =============================================================================
@@ -1206,7 +1219,7 @@ $MinSizeBytes = $null
 if (-not [string]::IsNullOrWhiteSpace($MinSize)) {
     $MinSizeBytes = ConvertTo-Bytes $MinSize
     if ($null -eq $MinSizeBytes) {
-        Write-Stdout ("LỖI: -MinSize không hợp lệ: '{0}'. Ví dụ: 100MB, 1.5GB, 2097152." -f $MinSize)
+        Write-Failure ("LỖI: -MinSize không hợp lệ: '{0}'. Ví dụ: 100MB, 1.5GB, 2097152." -f $MinSize)
         [Environment]::ExitCode = 2
         return
     }
@@ -1218,8 +1231,8 @@ $pathList = @($Path | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 $roots = @(if ($pathList.Count -gt 0) { $pathList } else { Get-DefaultRoots })
 
 if ($roots.Count -eq 0) {
-    Write-Stdout 'Không tìm thấy thư mục dev nào để quét.'
-    Write-Stdout 'Chỉ định thủ công, ví dụ:  .\scan-once.ps1 -Path D:\Projects'
+    Write-Failure ("Không tìm thấy thư mục nào để quét.`r`n" +
+        'Chỉ định thủ công, ví dụ:  .\scan-once.ps1 -Path D:\Projects')
     [Environment]::ExitCode = 2
     return
 }
@@ -1241,7 +1254,7 @@ $scanResult = $null
 try {
     $scanResult = Invoke-Scan -Roots $roots
 } catch {
-    Write-Stdout ("LỖI khi quét: {0}" -f $_.Exception.Message)
+    Write-Failure ("LỖI khi quét: {0}" -f $_.Exception.Message)
     [Environment]::ExitCode = 2
     return
 }
@@ -1252,7 +1265,7 @@ $report = $null
 try {
     $report = Out-Report -Result $scanResult -Destination $destination
 } catch {
-    Write-Stdout ("LỖI khi ghi kết quả: {0}" -f $_.Exception.Message)
+    Write-Failure ("LỖI khi ghi kết quả: {0}" -f $_.Exception.Message)
     [Environment]::ExitCode = 2
     return
 }
