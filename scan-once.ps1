@@ -228,6 +228,20 @@ function New-LookupSet {
     return , $set
 }
 
+function New-WildcardRegex {
+    param([string[]]$Patterns)
+
+    $parts = foreach ($pattern in $Patterns) {
+        [regex]::Escape($pattern).Replace('\*', '.*').Replace('\?', '.')
+    }
+    $options = [System.Text.RegularExpressions.RegexOptions]'IgnoreCase, CultureInvariant, Compiled'
+    return [regex]::new('^(?:' + ($parts -join '|') + ')$', $options)
+}
+
+$script:SecretRegex = New-WildcardRegex $script:SecretFilePatterns
+$script:MarkerRegex = New-WildcardRegex $script:ProjectMarkerPatterns
+$script:DotnetManifestRegex = New-WildcardRegex @('*.deps.json', '*.runtimeconfig*.json')
+
 $script:Lookup = @{
     Code        = New-LookupSet $script:CodeExtensions
     WeakConfig  = New-LookupSet $script:WeakConfigExtensions
@@ -448,19 +462,9 @@ function Get-ForbiddenRoots {
 
 $script:ForbiddenRoots = Get-ForbiddenRoots
 $script:ForbiddenLookup = New-LookupSet $script:ForbiddenRoots
+# Desktop, Downloads, Documents, ... : không bao giờ đề xuất cả thư mục, chỉ
+# đi vào trong để xét từng mục con (Invoke-Scan tra $script:ForbiddenLookup).
 $script:UserProfileDir = Get-NormalizedPath ([Environment]::GetFolderPath('UserProfile'))
-
-function Test-ProtectedContainer {
-    <#
-        Desktop, Downloads, Documents, ... : không bao giờ đề xuất cả thư mục,
-        chỉ đi vào trong để xét từng mục con.
-    #>
-    param([string]$Value)
-
-    $full = Get-NormalizedPath $Value
-    if ($null -eq $full) { return $false }
-    return $script:ForbiddenLookup.Contains($full.TrimEnd('\'))
-}
 
 function Get-BlockReason {
     <#
@@ -509,14 +513,12 @@ function Get-FileKind {
     if ([string]::IsNullOrWhiteSpace($Name)) { return 'Other' }
 
     if ($script:Lookup.SecretFiles.Contains($Name)) { return 'Secret' }
-    $isDotnetManifest = $Name -like '*.deps.json' -or $Name -like '*.runtimeconfig*.json'
-    foreach ($pattern in @($script:SecretFilePatterns)) {
-        if ($isDotnetManifest) { break }
-        if ($Name -like $pattern) { return 'Secret' }
-    }
+    if ($script:SecretRegex.IsMatch($Name) -and -not $script:DotnetManifestRegex.IsMatch($Name)) { return 'Secret' }
 
-    $ext = Get-ExtensionOf $Name
-    if ($ext) {
+    # Các HashSet đều OrdinalIgnoreCase nên không cần ToLower.
+    $dot = $Name.LastIndexOf('.')
+    if ($dot -ge 1) {
+        $ext = $Name.Substring($dot)
         if ($script:Lookup.Code.Contains($ext)) { return 'Code' }
         if ($script:Lookup.Media.Contains($ext)) { return 'Media' }
         if ($script:Lookup.Binary.Contains($ext)) { return 'Binary' }
@@ -530,9 +532,7 @@ function Test-ProjectMarker {
 
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
     if ($script:Lookup.Markers.Contains($Name)) { return $true }
-    foreach ($pattern in @($script:ProjectMarkerPatterns)) {
-        if ($Name -like $pattern) { return $true }
-    }
+    if ($script:MarkerRegex.IsMatch($Name)) { return $true }
     return $false
 }
 
@@ -547,19 +547,29 @@ function Get-FolderVerdict {
     $media = 0
     $total = 0
 
-    foreach ($child in $Children) {
-        $attributes = [int]$child.Attributes
-        $isDir = ($attributes -band [int][System.IO.FileAttributes]::Directory) -ne 0
+    # Gọi hàm trên PS 5.1 tốn vài chục µs mỗi lần, nên vòng này tự phân loại
+    # thay vì gọi Test-ProjectMarker / Get-FileKind cho từng file.
+    $dirFlag = [int][System.IO.FileAttributes]::Directory
+    $markerSet = $script:Lookup.Markers
+    $markerRegex = $script:MarkerRegex
+    $secretSet = $script:Lookup.SecretFiles
+    $secretRegex = $script:SecretRegex
+    $codeSet = $script:Lookup.Code
+    $mediaSet = $script:Lookup.Media
 
-        if (Test-ProjectMarker $child.Name) { $markers++ }
-        if ($isDir) { continue }
+    foreach ($child in $Children) {
+        $name = $child.Name
+
+        if ($markerSet.Contains($name) -or $markerRegex.IsMatch($name)) { $markers++ }
+        if (([int]$child.Attributes -band $dirFlag) -ne 0) { continue }
 
         $total++
-        switch (Get-FileKind $child.Name) {
-            'Code' { $code++ }
-            'Media' { $media++ }
-            default { }
-        }
+        if ($secretSet.Contains($name) -or $secretRegex.IsMatch($name)) { continue }
+        $dot = $name.LastIndexOf('.')
+        if ($dot -lt 1) { continue }
+        $ext = $name.Substring($dot)
+        if ($codeSet.Contains($ext)) { $code++ }
+        elseif ($mediaSet.Contains($ext)) { $media++ }
     }
 
     if ($markers -gt 0) { return @{ Kind = 'Project'; Reason = "Có $markers marker project" } }
@@ -617,112 +627,84 @@ function Get-DefaultRoots {
     return $roots.ToArray()
 }
 
-function Measure-FolderSize {
-    param([string]$Value, [int]$Limit = 750000)
+function Expand-Target {
+    <#
+        Một lần duyệt cho mỗi target: cộng dung lượng (tối đa $EntryLimit entry)
+        và giữ đường dẫn + kích thước của $Limit file đầu tiên.
+        Trả về @{ Size; Paths = List[string]; Sizes = List[long]; Truncated }
 
+        Không tạo object cho từng file: PSCustomObject trên PS 5.1 tốn hàng
+        chục µs mỗi cái, với node_modules 50.000 file là mất vài giây.
+    #>
+    param([string]$Value, [int]$Limit, [int]$EntryLimit = 750000)
+
+    $paths = New-Object 'System.Collections.Generic.List[string]'
+    $sizes = New-Object 'System.Collections.Generic.List[long]'
     $stack = New-Object 'System.Collections.Generic.Stack[string]'
-    $stack.Push((Get-NormalizedPath $Value))
+    $stack.Push((To-LongPath $Value))
+
+    $dirFlag = [int][System.IO.FileAttributes]::Directory
+    $reparseFlag = [int][System.IO.FileAttributes]::ReparsePoint
     $total = 0L
     $visited = 0
-
-    while ($stack.Count -gt 0) {
-        $current = $stack.Pop()
-        if ($null -eq $current) { continue }
-
-        try {
-            $info = New-Object System.IO.DirectoryInfo (To-LongPath $current)
-            if (-not $info.Exists) { continue }
-            $children = $info.EnumerateFileSystemInfos()
-        } catch { continue }
-
-        foreach ($child in $children) {
-            $visited++
-            if ($visited -gt $Limit) { return $total }
-
-            $attributes = [int]$child.Attributes
-            if (($attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
-
-            if (($attributes -band [int][System.IO.FileAttributes]::Directory) -ne 0) {
-                $stack.Push((From-LongPath $child.FullName))
-            } else {
-                try { $total += [long]$child.Length } catch { }
-            }
-        }
-    }
-    return $total
-}
-
-function Get-FilesUnder {
-    <#
-        Bung một folder ra danh sách file cụ thể. Bỏ qua junction/symlink.
-        Trả về @{ Files = [object[]]; Truncated = [bool]; TotalFiles = [int] }
-
-        Mỗi file mang sẵn TargetPath = folder gốc, để lúc lọc theo Kind chỉ cần
-        một phép tra HashSet thay vì kiểm tra "path có nằm dưới target nào"
-        cho từng file (việc đó là O(file × target) và sẽ rất chậm).
-    #>
-    param(
-        [string]$Value,
-        [int]$Limit,
-        [string]$KindLabel,
-        [string]$Reason
-    )
-
-    $files = New-Object 'System.Collections.Generic.List[object]'
-    $stack = New-Object 'System.Collections.Generic.Stack[string]'
-    $stack.Push((Get-NormalizedPath $Value))
-    $count = 0
     $truncated = $false
 
     while ($stack.Count -gt 0) {
-        if ($count -ge $Limit) { $truncated = $true; break }
-
         $current = $stack.Pop()
-        if ($null -eq $current) { continue }
+        try {
+            foreach ($child in ([System.IO.DirectoryInfo]::new($current)).EnumerateFileSystemInfos()) {
+                $visited++
+                if ($visited -gt $EntryLimit) { $truncated = $true; $stack.Clear(); break }
 
-        foreach ($child in (Get-ChildInfos $current)) {
-            $attributes = [int]$child.Attributes
-            if (($attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                $attributes = [int]$child.Attributes
+                if (($attributes -band $reparseFlag) -ne 0) { continue }
+                if (($attributes -band $dirFlag) -ne 0) { $stack.Push($child.FullName); continue }
 
-            $childPath = From-LongPath $child.FullName
+                $length = $child.Length
+                $total += $length
+                if ($paths.Count -ge $Limit) { $truncated = $true; continue }
 
-            if (($attributes -band [int][System.IO.FileAttributes]::Directory) -ne 0) {
-                $stack.Push($childPath)
-                continue
+                $full = $child.FullName
+                if ($full.StartsWith('\\?\UNC\')) { $full = '\\' + $full.Substring(8) }
+                elseif ($full.StartsWith('\\?\')) { $full = $full.Substring(4) }
+                $paths.Add($full)
+                $sizes.Add($length)
             }
-
-            $size = 0L
-            try { $size = [long]$child.Length } catch { }
-
-            [void]$files.Add([PSCustomObject]@{
-                    Path       = $childPath
-                    Size       = $size
-                    Kind       = $KindLabel
-                    Reason     = $Reason
-                    TargetPath = $Value
-                })
-            $count++
-            if ($count -ge $Limit) { $truncated = $true; break }
-        }
+        } catch { }
     }
 
-    return @{
-        Files      = $files.ToArray()
-        Truncated  = $truncated
-        TotalFiles = $count
+    return @{ Size = $total; Paths = $paths; Sizes = $sizes; Truncated = $truncated }
+}
+
+function New-ScanTarget {
+    <#
+        Target giữ luôn danh sách file của nó (Paths/Sizes song song), nên lọc
+        theo Kind chỉ là lọc target, không phải duyệt từng file.
+    #>
+    param([string]$Path, [string]$Name, [string]$Kind, [string]$Reason, $Expanded)
+
+    return [PSCustomObject]@{
+        Path      = $Path
+        Name      = $Name
+        Kind      = $Kind
+        Size      = [long]$Expanded.Size
+        Reason    = $Reason
+        Blocked   = Get-BlockReason $Path
+        Paths     = $Expanded.Paths
+        Sizes     = $Expanded.Sizes
+        Truncated = [bool]$Expanded.Truncated
     }
 }
 
 function Invoke-Scan {
     <#
         Duyệt toàn bộ root, trả về:
-          Targets = mục cấp cao (project / devdir / secret / codefile)
-          Files   = danh sách file cụ thể bên trong từng target
+          Targets = mục cấp cao (project / devdir / secret / codefile), mỗi mục
+                    mang sẵn danh sách file cụ thể (Paths/Sizes)
     #>
     param([string[]]$Roots)
 
     $targets = New-Object 'System.Collections.Generic.List[object]'
-    $allFiles = New-Object 'System.Collections.Generic.List[object]'
     $notes = New-Object 'System.Collections.Generic.List[object]'
 
     $stats = [PSCustomObject]@{
@@ -732,6 +714,20 @@ function Invoke-Scan {
     }
 
     $maxEntries = 750000
+
+    # Vòng duyệt chạy cho mọi entry trên đĩa: đọc sẵn hằng số và lookup ra
+    # biến local, tự phân loại inline thay vì gọi hàm cho từng file.
+    $dirFlag = [int][System.IO.FileAttributes]::Directory
+    $reparseFlag = [int][System.IO.FileAttributes]::ReparsePoint
+    $skipSet = $script:Lookup.SkipDirs
+    $devSet = $script:Lookup.DevDirs
+    $secretDirSet = $script:Lookup.SecretDirs
+    $secretFileSet = $script:Lookup.SecretFiles
+    $codeSet = $script:Lookup.Code
+    $secretRegex = $script:SecretRegex
+    $manifestRegex = $script:DotnetManifestRegex
+    $forbidden = $script:ForbiddenLookup
+    $homeDir = if ($null -ne $script:UserProfileDir) { $script:UserProfileDir.TrimEnd('\') } else { $null }
 
     foreach ($root in $Roots) {
         $resolved = Get-NormalizedPath $root
@@ -743,13 +739,13 @@ function Invoke-Scan {
         # Duyệt BFS. Root không phải project thì đi tiếp; gặp project/devdir/
         # secret thì ghi nhận và KHÔNG đi vào (đã có danh sách file riêng).
         $queue = New-Object 'System.Collections.Generic.Queue[object]'
-        $queue.Enqueue(@{ Path = $resolved; Depth = 0 })
+        $queue.Enqueue(@{ Path = $resolved; Depth = 0; SecretsOnly = $false; Children = $null })
 
         while ($queue.Count -gt 0) {
             $item = $queue.Dequeue()
             $currentPath = $item.Path
             $depth = $item.Depth
-            $secretsOnly = [bool]$item['SecretsOnly']
+            $secretsOnly = $item.SecretsOnly
 
             if ($stats.EntriesVisited -ge $maxEntries) {
                 $stats.Truncated = $true
@@ -760,156 +756,117 @@ function Invoke-Scan {
                 break
             }
 
-            $children = Get-ChildInfos $currentPath
+            # Đã liệt kê lúc xét verdict ở vòng trước thì dùng lại, khỏi đọc đĩa lần hai.
+            # Gán trong từng nhánh và bọc @(): PowerShell mở mảng 0/1 phần tử
+            # thành $null/scalar cả khi return lẫn khi lấy output của if.
+            $children = $item.Children
+            if ($null -eq $children) { $children = @(Get-ChildInfos $currentPath) }
             $stats.FoldersVisited++
-            $stats.EntriesVisited += @($children).Count
+            $stats.EntriesVisited += $children.Count
+
+            $isHomeLevel = $null -ne $homeDir -and
+                [string]::Equals($currentPath.TrimEnd('\'), $homeDir, [StringComparison]::OrdinalIgnoreCase)
 
             foreach ($child in $children) {
                 $attributes = [int]$child.Attributes
-                if (($attributes -band [int][System.IO.FileAttributes]::ReparsePoint) -ne 0) { continue }
+                if (($attributes -band $reparseFlag) -ne 0) { continue }
 
-                $childPath = From-LongPath $child.FullName
-                $isDir = ($attributes -band [int][System.IO.FileAttributes]::Directory) -ne 0
+                $name = $child.Name
+                $childPath = $child.FullName
+                if ($childPath.StartsWith('\\?\UNC\')) { $childPath = '\\' + $childPath.Substring(8) }
+                elseif ($childPath.StartsWith('\\?\')) { $childPath = $childPath.Substring(4) }
 
-                if ($isDir) {
-                    if ($script:Lookup.SkipDirs.Contains($child.Name)) { continue }
+                if (($attributes -band $dirFlag) -ne 0) {
+                    if ($skipSet.Contains($name)) { continue }
 
                     $kindLabel = $null
                     $reason = $null
 
-                    if ($script:Lookup.DevDirs.Contains($child.Name)) {
+                    if (-not $secretsOnly -and $devSet.Contains($name)) {
                         $kindLabel = 'DevDir'
-                        $reason = "Thư mục rác dev: $($child.Name)"
-                    } elseif ($script:Lookup.SecretDirs.Contains($child.Name)) {
+                        $reason = "Thư mục rác dev: $name"
+                    } elseif ($secretDirSet.Contains($name)) {
                         $kindLabel = 'Secret'
-                        $reason = "Thư mục chứa thông tin đăng nhập: $($child.Name)"
+                        $reason = "Thư mục chứa thông tin đăng nhập: $name"
                     }
 
-                    if ($secretsOnly -and $kindLabel -eq 'DevDir') { $kindLabel = $null }
-
-                    # .vscode, .rustup, .cargo, ... ngay dưới home là dữ liệu của
-                    # công cụ đã cài, không phải project của người dùng: chỉ tìm
-                    # secret trong đó (vd .ollama\id_ed25519).
-                    if ($null -eq $kindLabel -and -not $secretsOnly -and $child.Name.StartsWith('.') -and
-                        $null -ne $script:UserProfileDir -and
-                        [string]::Equals((Get-NormalizedPath $currentPath), $script:UserProfileDir, [StringComparison]::OrdinalIgnoreCase)) {
-                        $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $true })
-                        continue
-                    }
-
-                    if ($null -eq $kindLabel -and $secretsOnly) {
-                        if ($depth -lt $MaxDepth) {
-                            $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $true })
+                    if ($null -eq $kindLabel) {
+                        # .vscode, .rustup, .cargo, ... ngay dưới home là dữ liệu của
+                        # công cụ đã cài, không phải project của người dùng: chỉ tìm
+                        # secret trong đó (vd .ollama\id_ed25519).
+                        if ($secretsOnly -or ($isHomeLevel -and $name.StartsWith('.'))) {
+                            if ($depth -lt $MaxDepth) {
+                                $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $true; Children = $null })
+                            }
+                            continue
                         }
-                        continue
-                    }
 
-                    if ($null -eq $kindLabel -and (Test-ProtectedContainer $childPath)) {
-                        if ($depth -lt $MaxDepth) {
-                            $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1) })
+                        if ($forbidden.Contains($childPath)) {
+                            if ($depth -lt $MaxDepth) {
+                                $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $false; Children = $null })
+                            }
+                            continue
                         }
-                        continue
+
+                        if ($depth -ge $MaxDepth) { continue }
+
+                        $subChildren = @(Get-ChildInfos $childPath)
+                        $verdict = Get-FolderVerdict -Children $subChildren
+
+                        # MediaHeavy: không phải code, không đưa vào danh sách dọn.
+                        if ($verdict.Kind -eq 'MediaHeavy') { continue }
+                        if ($verdict.Kind -ne 'Project') {
+                            $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $false; Children = $subChildren })
+                            continue
+                        }
+
+                        $kindLabel = 'Project'
+                        $reason = $verdict.Reason
                     }
 
-                    if ($null -ne $kindLabel) {
-                        $size = Measure-FolderSize $childPath
-                        [void]$targets.Add([PSCustomObject]@{
-                                Path    = $childPath
-                                Name    = $child.Name
-                                Kind    = $kindLabel
-                                Size    = $size
-                                Reason  = $reason
-                                Blocked = Get-BlockReason $childPath
+                    $expanded = Expand-Target -Value $childPath -Limit $MaxFilesPerTarget
+                    [void]$targets.Add((New-ScanTarget -Path $childPath -Name $name -Kind $kindLabel -Reason $reason -Expanded $expanded))
+                    if ($expanded.Truncated) {
+                        [void]$notes.Add([PSCustomObject]@{
+                                Path = $childPath
+                                Note = "Danh sách file bị cắt ở $MaxFilesPerTarget (còn nữa)."
                             })
-
-                        $expanded = Get-FilesUnder -Value $childPath -Limit $MaxFilesPerTarget `
-                            -KindLabel $kindLabel -Reason $reason
-                        foreach ($file in $expanded.Files) { [void]$allFiles.Add($file) }
-
-                        if ($expanded.Truncated) {
-                            [void]$notes.Add([PSCustomObject]@{
-                                    Path = $childPath
-                                    Note = "Danh sách file bị cắt ở $MaxFilesPerTarget (còn nữa)."
-                                })
-                        }
-                        continue
                     }
-
-                    if ($depth -ge $MaxDepth) { continue }
-
-                    $subChildren = Get-ChildInfos $childPath
-                    $verdict = Get-FolderVerdict -Children $subChildren
-
-                    if ($verdict.Kind -eq 'Project') {
-                        $size = Measure-FolderSize $childPath
-                        [void]$targets.Add([PSCustomObject]@{
-                                Path    = $childPath
-                                Name    = $child.Name
-                                Kind    = 'Project'
-                                Size    = $size
-                                Reason  = $verdict.Reason
-                                Blocked = Get-BlockReason $childPath
-                            })
-
-                        $expanded = Get-FilesUnder -Value $childPath -Limit $MaxFilesPerTarget `
-                            -KindLabel 'Project' -Reason $verdict.Reason
-                        foreach ($file in $expanded.Files) { [void]$allFiles.Add($file) }
-
-                        if ($expanded.Truncated) {
-                            [void]$notes.Add([PSCustomObject]@{
-                                    Path = $childPath
-                                    Note = "Danh sách file bị cắt ở $MaxFilesPerTarget (còn nữa)."
-                                })
-                        }
-                        continue
-                    }
-
-                    if ($verdict.Kind -eq 'MediaHeavy') {
-                        # Không phải code, không đưa vào danh sách dọn.
-                        continue
-                    }
-
-                    $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1) })
                     continue
                 }
 
                 # --- File lẻ ---
-                $fileKind = Get-FileKind $child.Name
-                if ($fileKind -ne 'Secret' -and $fileKind -ne 'Code') { continue }
-                if ($secretsOnly -and $fileKind -ne 'Secret') { continue }
+                $isSecret = $secretFileSet.Contains($name) -or
+                    ($secretRegex.IsMatch($name) -and -not $manifestRegex.IsMatch($name))
+                if (-not $isSecret) {
+                    if ($secretsOnly) { continue }
+                    $dot = $name.LastIndexOf('.')
+                    if ($dot -lt 1 -or -not $codeSet.Contains($name.Substring($dot))) { continue }
+                }
 
-                $label = if ($fileKind -eq 'Secret') { 'Secret' } else { 'CodeFile' }
-                $reason = if ($fileKind -eq 'Secret') {
-                    "File chứa thông tin đăng nhập: $($child.Name)"
+                $label = if ($isSecret) { 'Secret' } else { 'CodeFile' }
+                $reason = if ($isSecret) {
+                    "File chứa thông tin đăng nhập: $name"
                 } else {
                     'File source code nằm ngoài project'
                 }
 
-                $size = 0L
-                try { $size = [long]$child.Length } catch { }
-
-                [void]$targets.Add([PSCustomObject]@{
-                        Path    = $childPath
-                        Name    = $child.Name
-                        Kind    = $label
-                        Size    = $size
-                        Reason  = $reason
-                        Blocked = Get-BlockReason $childPath
-                    })
-                [void]$allFiles.Add([PSCustomObject]@{
-                        Path       = $childPath
-                        Size       = $size
-                        Kind       = $label
-                        Reason     = $reason
-                        TargetPath = $childPath
-                    })
+                $size = [long]$child.Length
+                $single = @{
+                    Size      = $size
+                    Paths     = [System.Collections.Generic.List[string]]::new()
+                    Sizes     = [System.Collections.Generic.List[long]]::new()
+                    Truncated = $false
+                }
+                $single.Paths.Add($childPath)
+                $single.Sizes.Add($size)
+                [void]$targets.Add((New-ScanTarget -Path $childPath -Name $name -Kind $label -Reason $reason -Expanded $single))
             }
         }
     }
 
     return @{
         Targets = $targets.ToArray()
-        Files   = $allFiles.ToArray()
         Notes   = $notes.ToArray()
         Stats   = $stats
     }
@@ -918,6 +875,26 @@ function Invoke-Scan {
 # =============================================================================
 # 6. Xuất kết quả
 # =============================================================================
+
+function ConvertTo-JsonString {
+    param([string]$Value)
+
+    if ($null -eq $Value) { return 'null' }
+    $builder = [System.Text.StringBuilder]::new($Value.Length + 2)
+    [void]$builder.Append('"')
+    foreach ($ch in $Value.ToCharArray()) {
+        switch ($ch) {
+            '"' { [void]$builder.Append('\"') }
+            '\' { [void]$builder.Append('\\') }
+            default {
+                if ([int]$ch -lt 0x20) { [void]$builder.AppendFormat('\u{0:x4}', [int]$ch) }
+                else { [void]$builder.Append($ch) }
+            }
+        }
+    }
+    [void]$builder.Append('"')
+    return $builder.ToString()
+}
 
 function Out-Report {
     param($Result, [string]$Destination)
@@ -933,100 +910,149 @@ function Out-Report {
         $Kind
     }
 
-    $targets = @($Result.Targets | Where-Object { $wantedKinds -contains $_.Kind -and -not $_.Blocked })
-    # Lọc theo Kind bằng HashSet của target path đã chọn. Không kiểm tra
-    # "path có nằm dưới target nào" cho từng file, vì với 50.000 file × 200
-    # target thì đó là 10 triệu phép so sánh chuỗi.
-    $keptTargets = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
-    foreach ($target in $targets) { [void]$keptTargets.Add($target.Path) }
-
-    $files = @($Result.Files | Where-Object {
-            ($wantedKinds -contains $_.Kind) -and $keptTargets.Contains($_.TargetPath)
-        })
-
-    # Lọc MinSize
-    if ($null -ne $script:MinSizeBytes) {
-        $files = @($files | Where-Object { $_.Size -ge $script:MinSizeBytes })
-        $targets = @($targets | Where-Object { $_.Size -ge $script:MinSizeBytes })
-    }
-
-    $files = @($files | Sort-Object -Property Size -Descending)
+    $minSize = $script:MinSizeBytes
+    $kindTargets = @($Result.Targets | Where-Object { $wantedKinds -contains $_.Kind -and -not $_.Blocked })
+    $targets = if ($null -ne $minSize) { @($kindTargets | Where-Object { $_.Size -ge $minSize }) } else { $kindTargets }
     $targets = @($targets | Sort-Object -Property Size -Descending)
 
+    # Gom file của mọi target vào mảng song song rồi Array.Sort một lần.
+    # Sort-Object / Where-Object trên hàng chục nghìn object mất nhiều giây.
+    $capacity = 0
+    foreach ($target in $kindTargets) { $capacity += $target.Paths.Count }
+
+    $filePaths = New-Object 'string[]' $capacity
+    $fileSizes = New-Object 'long[]' $capacity
+    $fileOwner = New-Object 'int[]' $capacity
+    $count = 0
     $totalBytes = 0L
-    foreach ($file in $files) { $totalBytes += [long]$file.Size }
 
-    # --- TXT: danh sách đường dẫn, đúng thứ người dùng cần ---
-    $txtPath = Join-PathSafe $Destination ("danh-sach-file-{0}.txt" -f $script:RunId)
-    $lines = New-Object 'System.Collections.Generic.List[string]'
-    $lines.Add("# presale-wiper - danh sách file CẦN DỌN (chưa xoá gì)")
-    $lines.Add("# Tạo lúc: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    $lines.Add("# Số file: $(@($files).Count) | Tổng: $(Format-Size $totalBytes)")
-    $lines.Add('#')
-    $lines.Add('# CẢNH BÁO: file này liệt kê đường dẫn tuyệt đối trên máy bạn.')
-    $lines.Add('# Đừng chia sẻ công khai - nó cho thấy cấu trúc thư mục của bạn.')
-    $lines.Add('')
-    foreach ($file in $files) { $lines.Add($file.Path) }
-    [System.IO.File]::WriteAllLines((To-LongPath $txtPath), $lines.ToArray(), (New-Object System.Text.UTF8Encoding($false)))
-
-    # --- CSV: chi tiết để lọc/sắp xếp trong Excel ---
-    $csvPath = Join-PathSafe $Destination ("danh-sach-file-{0}.csv" -f $script:RunId)
-    $csvRows = @($files | ForEach-Object {
-            [PSCustomObject]@{
-                Path   = $_.Path
-                SizeBytes = $_.Size
-                SizeText  = Format-Size $_.Size
-                Kind      = $_.Kind
-                Reason    = $_.Reason
-            }
-        })
-    $csvRows | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
-
-    # --- JSON ---
-    $jsonPath = Join-PathSafe $Destination ("danh-sach-file-{0}.json" -f $script:RunId)
-    $jsonObject = [ordered]@{
-        tool        = 'presale-wiper scan-once'
-        mode        = 'scan-only'
-        deleted     = $false
-        generatedAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-        computer    = $env:COMPUTERNAME
-        user        = $env:USERNAME
-        roots       = @($Result.Roots)
-        totals      = [ordered]@{
-            targets   = @($targets).Count
-            files     = @($files).Count
-            sizeBytes = $totalBytes
-            sizeText  = Format-Size $totalBytes
+    for ($t = 0; $t -lt $kindTargets.Count; $t++) {
+        $paths = $kindTargets[$t].Paths
+        $sizes = $kindTargets[$t].Sizes
+        for ($j = 0; $j -lt $paths.Count; $j++) {
+            $size = $sizes[$j]
+            if ($null -ne $minSize -and $size -lt $minSize) { continue }
+            $filePaths[$count] = $paths[$j]
+            $fileSizes[$count] = $size
+            $fileOwner[$count] = $t
+            $totalBytes += $size
+            $count++
         }
-        targets     = @($targets | ForEach-Object {
-                [ordered]@{
-                    path   = $_.Path
-                    kind   = $_.Kind
-                    sizeBytes = $_.Size
-                    sizeText  = Format-Size $_.Size
-                    reason = $_.Reason
-                }
-            })
-        files       = @($files | ForEach-Object {
-                [ordered]@{
-                    path      = $_.Path
-                    sizeBytes = $_.Size
-                    kind      = $_.Kind
-                }
-            })
-        notes       = @($Result.Notes | ForEach-Object {
-                [ordered]@{ path = [string]$_.Path; note = [string]$_.Note }
-            })
     }
-    $json = ConvertTo-Json -InputObject $jsonObject -Depth 6
-    [System.IO.File]::WriteAllText((To-LongPath $jsonPath), $json, (New-Object System.Text.UTF8Encoding($false)))
+
+    $sortKeys = [long[]]$fileSizes.Clone()
+    $order = [int[]][System.Linq.Enumerable]::ToArray([System.Linq.Enumerable]::Range(0, $capacity))
+    if ($count -gt 1) { [Array]::Sort($sortKeys, $order, 0, $count) }
+
+    $txtPath = Join-PathSafe $Destination ("danh-sach-file-{0}.txt" -f $script:RunId)
+    $csvPath = Join-PathSafe $Destination ("danh-sach-file-{0}.csv" -f $script:RunId)
+    $jsonPath = Join-PathSafe $Destination ("danh-sach-file-{0}.json" -f $script:RunId)
+
+    $noBom = New-Object System.Text.UTF8Encoding($false)
+    $withBom = New-Object System.Text.UTF8Encoding($true)
+    $invariant = [System.Globalization.CultureInfo]::InvariantCulture
+    $units = @('B', 'KB', 'MB', 'GB', 'TB')
+
+    $txt = [System.IO.StreamWriter]::new((To-LongPath $txtPath), $false, $noBom)
+    # Export-Csv -Encoding UTF8 của PS 5.1 có BOM; giữ BOM để Excel đọc đúng tiếng Việt.
+    $csv = [System.IO.StreamWriter]::new((To-LongPath $csvPath), $false, $withBom)
+    $json = [System.IO.StreamWriter]::new((To-LongPath $jsonPath), $false, $noBom)
+    $topFiles = New-Object 'System.Collections.Generic.List[object]'
+
+    try {
+        # --- TXT: danh sách đường dẫn, đúng thứ người dùng cần ---
+        $txt.WriteLine('# presale-wiper - danh sách file CẦN DỌN (chưa xoá gì)')
+        $txt.WriteLine("# Tạo lúc: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
+        $txt.WriteLine("# Số file: $count | Tổng: $(Format-Size $totalBytes)")
+        $txt.WriteLine('#')
+        $txt.WriteLine('# CẢNH BÁO: file này liệt kê đường dẫn tuyệt đối trên máy bạn.')
+        $txt.WriteLine('# Đừng chia sẻ công khai - nó cho thấy cấu trúc thư mục của bạn.')
+        $txt.WriteLine('')
+
+        # --- CSV: chi tiết để lọc/sắp xếp trong Excel ---
+        $csv.WriteLine('"Path","SizeBytes","SizeText","Kind","Reason"')
+
+        # --- JSON ---
+        $json.WriteLine('{')
+        $json.WriteLine('  "tool": "presale-wiper scan-once",')
+        $json.WriteLine('  "mode": "scan-only",')
+        $json.WriteLine('  "deleted": false,')
+        $json.WriteLine('  "generatedAt": ' + (ConvertTo-JsonString (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')) + ',')
+        $json.WriteLine('  "computer": ' + (ConvertTo-JsonString $env:COMPUTERNAME) + ',')
+        $json.WriteLine('  "user": ' + (ConvertTo-JsonString $env:USERNAME) + ',')
+        $json.WriteLine('  "roots": [' + ((@($Result.Roots) | ForEach-Object { ConvertTo-JsonString ([string]$_) }) -join ', ') + '],')
+        $json.WriteLine('  "totals": {')
+        $json.WriteLine("    `"targets`": $($targets.Count),")
+        $json.WriteLine("    `"files`": $count,")
+        $json.WriteLine("    `"sizeBytes`": $totalBytes,")
+        $json.WriteLine('    "sizeText": ' + (ConvertTo-JsonString (Format-Size $totalBytes)))
+        $json.WriteLine('  },')
+
+        $json.WriteLine('  "targets": [')
+        for ($i = 0; $i -lt $targets.Count; $i++) {
+            $target = $targets[$i]
+            $separator = if ($i -lt $targets.Count - 1) { ',' } else { '' }
+            $json.WriteLine('    {"path": ' + (ConvertTo-JsonString $target.Path) +
+                ', "kind": "' + $target.Kind + '", "sizeBytes": ' + $target.Size +
+                ', "sizeText": "' + (Format-Size $target.Size) +
+                '", "reason": ' + (ConvertTo-JsonString $target.Reason) + '}' + $separator)
+        }
+        $json.WriteLine('  ],')
+
+        # Đường dẫn Windows không chứa ký tự điều khiển, nên chỉ cần thoát \ và ".
+        $csvReason = New-Object 'string[]' $kindTargets.Count
+        $jsonKind = New-Object 'string[]' $kindTargets.Count
+        for ($t = 0; $t -lt $kindTargets.Count; $t++) {
+            $csvReason[$t] = '","' + $kindTargets[$t].Kind + '","' + $kindTargets[$t].Reason.Replace('"', '""') + '"'
+            $jsonKind[$t] = ', "kind": "' + $kindTargets[$t].Kind + '"}'
+        }
+
+        $json.WriteLine('  "files": [')
+        for ($i = $count - 1; $i -ge 0; $i--) {
+            $index = $order[$i]
+            $path = $filePaths[$index]
+            $size = $fileSizes[$index]
+
+            if ($size -lt 1024) {
+                $sizeText = "$size B"
+            } else {
+                $value = [double]$size
+                $unit = 0
+                while ($value -ge 1024 -and $unit -lt 4) { $value = $value / 1024; $unit++ }
+                $sizeText = $value.ToString('F1', $invariant) + ' ' + $units[$unit]
+            }
+
+            $txt.WriteLine($path)
+            $csv.WriteLine('"' + $path.Replace('"', '""') + '","' + $size + '","' + $sizeText + $csvReason[$fileOwner[$index]])
+            $separator = if ($i -gt 0) { ',' } else { '' }
+            $json.WriteLine('    {"path": "' + $path.Replace('\', '\\').Replace('"', '\"') + '", "sizeBytes": ' + $size + $jsonKind[$fileOwner[$index]] + $separator)
+
+            if ($topFiles.Count -lt 15) { [void]$topFiles.Add([PSCustomObject]@{ Path = $path; Size = $size }) }
+        }
+        $json.WriteLine('  ],')
+
+        $noteItems = @($Result.Notes)
+        $json.WriteLine('  "notes": [')
+        for ($i = 0; $i -lt $noteItems.Count; $i++) {
+            $separator = if ($i -lt $noteItems.Count - 1) { ',' } else { '' }
+            $json.WriteLine('    {"path": ' + (ConvertTo-JsonString ([string]$noteItems[$i].Path)) +
+                ', "note": ' + (ConvertTo-JsonString ([string]$noteItems[$i].Note)) + '}' + $separator)
+        }
+        $json.WriteLine('  ]')
+        $json.WriteLine('}')
+    } finally {
+        $txt.Dispose()
+        $csv.Dispose()
+        $json.Dispose()
+    }
 
     return @{
         Txt       = $txtPath
         Csv       = $csvPath
         Json      = $jsonPath
         Targets   = $targets
-        Files     = $files
+        FileCount = $count
+        TopFiles  = $topFiles.ToArray()
         TotalSize = $totalBytes
     }
 }
@@ -1056,7 +1082,7 @@ function Show-Summary {
             }
         }
 
-        $topFiles = @($Report.Files | Select-Object -First 15)
+        $topFiles = @($Report.TopFiles)
         if (@($topFiles).Count -gt 0) {
             Write-Stdout ''
             Write-Stdout '--- File lớn nhất ---'
@@ -1071,7 +1097,7 @@ function Show-Summary {
     Write-Stdout ''
     Write-Stdout '--- Tổng kết ---'
     Write-Stdout ("  Mục (project/devdir/secret) : {0}" -f @($Report.Targets).Count)
-    Write-Stdout ("  File cụ thể                 : {0}" -f @($Report.Files).Count)
+    Write-Stdout ("  File cụ thể                 : {0}" -f $Report.FileCount)
     Write-Stdout ("  Tổng dung lượng             : {0}" -f (Format-Size $Report.TotalSize))
     Write-Stdout ''
     Write-Stdout '--- File kết quả ---'
