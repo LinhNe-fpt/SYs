@@ -48,6 +48,36 @@ cd presale-wiper
 .\presale-wiper.ps1 report -FromLog ~\.presale-wiper\presale-wiper.log -Tail 50
 ```
 
+## Chạy một lần, chỉ lấy danh sách
+
+Nếu bạn chỉ muốn **danh sách file cần dọn** để tự xem, dùng `scan-once.ps1`:
+file độc lập, không import module, không cần admin, không hỏi xác nhận, và
+**không chứa bất kỳ lệnh xoá nào**.
+
+```powershell
+.\scan-once.ps1
+```
+
+Kết quả ghi vào `%USERPROFILE%\presale-scan-<timestamp>\`:
+
+| File | Nội dung |
+|---|---|
+| `*.txt` | Danh sách đường dẫn tuyệt đối, mỗi file một dòng — dùng để đọc/xem |
+| `*.csv` | Chi tiết: path, size, kind, lý do — mở bằng Excel để lọc/sắp xếp |
+| `*.json` | Cho tooling, có `"deleted": false` |
+
+Tuỳ chọn:
+
+```powershell
+.\scan-once.ps1 -Path D:\OldProjects          # quét thư mục cụ thể
+.\scan-once.ps1 -MinSize 100MB                # chỉ mục lớn
+.\scan-once.ps1 -Kind Secret                  # chỉ tìm secret
+.\scan-once.ps1 -OutDir C:\temp\my-list       # đổi nơi ghi
+```
+
+Đã kiểm chứng read-only: hash toàn bộ cây fixture (SHA-256 trên tên + kích
+thước + mtime của 84 file) **không đổi** sau khi chạy.
+
 ### Tuỳ chọn thường dùng
 
 | Tuỳ chọn | Ý nghĩa |
