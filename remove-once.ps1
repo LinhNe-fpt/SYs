@@ -169,7 +169,7 @@ foreach ($name in @('pagefile.sys', 'hiberfil.sys', 'swapfile.sys', 'bootmgr', '
 }
 
 function Get-BlockReason {
-    param([string]$FullPath)
+    param([string]$FullPath, [switch]$AllowAppData)
 
     if ([string]::IsNullOrWhiteSpace($FullPath)) { return 'Đường dẫn rỗng.' }
     if ($FullPath -match '^[A-Za-z]:\\?$') { return 'Là gốc ổ đĩa.' }
@@ -182,7 +182,11 @@ function Get-BlockReason {
     if ($script:CriticalFiles.Contains($leaf)) { return "File hệ thống: $leaf" }
 
     for ($i = 1; $i -lt $segments.Count; $i++) {
-        if ($script:NeverTouch.Contains($segments[$i])) { return "Nằm trong thư mục cấm '$($segments[$i])'." }
+        $segment = $segments[$i]
+        # Lịch sử IDE nằm trong AppData: chỉ bỏ qua đúng AppData khi target được
+        # scan gắn nhãn IdeHistory (đã lọc theo danh sách IDE cụ thể).
+        if ($AllowAppData -and ($segment -eq 'AppData' -or $segment -eq 'Local Settings')) { continue }
+        if ($script:NeverTouch.Contains($segment)) { return "Nằm trong thư mục cấm '$segment'." }
     }
 
     foreach ($forbidden in $script:ForbiddenExact) {
@@ -286,6 +290,35 @@ if (-not [string]::IsNullOrWhiteSpace($dirsSource)) {
     } finally { $reader.Dispose() }
 }
 
+# Lịch sử IDE: danh sách đường dẫn được phép xoá dù nằm trong AppData.
+$ideAllowed = New-Object 'System.Collections.Generic.List[string]'
+if (-not [string]::IsNullOrWhiteSpace($planDir)) {
+    $ideFiles = @([System.IO.Directory]::GetFiles((To-Long $planDir), 'danh-sach-ide-*.txt') | Sort-Object -Descending)
+    if ($ideFiles.Count -gt 0) {
+        $reader = New-Object System.IO.StreamReader ((To-Long $ideFiles[0]), [System.Text.Encoding]::UTF8)
+        try {
+            while ($null -ne ($line = $reader.ReadLine())) {
+                if ([string]::IsNullOrWhiteSpace($line) -or $line.StartsWith('#')) { continue }
+                $pipe = $line.LastIndexOf('|')
+                $path = if ($pipe -gt 0) { $line.Substring(0, $pipe) } else { $line }
+                $full = Get-FullPathSafe $path.Trim()
+                if ($null -ne $full) { $ideAllowed.Add($full) }
+            }
+        } finally { $reader.Dispose() }
+    }
+}
+
+function Test-IdeAllowed {
+    param([string]$FullPath)
+
+    foreach ($allowed in $ideAllowed) {
+        if ([string]::Equals($FullPath, $allowed, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+        $prefix = if ($allowed.EndsWith('\')) { $allowed } else { $allowed + '\' }
+        if ($FullPath.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { return $true }
+    }
+    return $false
+}
+
 # -----------------------------------------------------------------------------
 # 4. Lọc lại từng file
 # -----------------------------------------------------------------------------
@@ -302,7 +335,8 @@ foreach ($raw in $fileList) {
     }
     if (-not $seen.Add($full)) { continue }
 
-    $reason = Get-BlockReason $full
+    # Lịch sử IDE được phép nằm trong AppData; mọi kiểm tra khác vẫn áp dụng.
+    $reason = if (Test-IdeAllowed $full) { Get-BlockReason $full -AllowAppData } else { Get-BlockReason $full }
     if ($null -ne $reason) {
         [void]$skipped.Add([PSCustomObject]@{ Path = $full; Reason = $reason })
         continue
@@ -320,7 +354,8 @@ $dirsToRemove = New-Object 'System.Collections.Generic.List[string]'
 foreach ($raw in $dirList) {
     $full = Get-FullPathSafe $raw
     if ($null -eq $full) { continue }
-    if ($null -ne (Get-BlockReason $full)) { continue }
+    $blocked = if (Test-IdeAllowed $full) { Get-BlockReason $full -AllowAppData } else { Get-BlockReason $full }
+    if ($null -ne $blocked) { continue }
     if ([System.IO.Directory]::Exists((To-Long $full))) { $dirsToRemove.Add($full) }
 }
 

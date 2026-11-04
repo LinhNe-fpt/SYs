@@ -81,6 +81,17 @@ USB / ổ mạng). Tự bỏ qua:
   web server như xampp vẫn xét `htdocs` / `www`
 - trong `.vscode`, `.cargo`, ... của mỗi profile: chỉ tìm secret
 
+Ngoài ra công cụ dò **lịch sử project của IDE** (loại `IdeHistory`): VS Code,
+VS Code Insiders, Cursor, VSCodium, Windsurf, Trae, Antigravity, JetBrains
+(IntelliJ/PyCharm/WebStorm/GoLand/Rider), Visual Studio 2019/2022, SSMS,
+Sublime Text, Notepad++, Code::Blocks, Claude Desktop, cùng PowerShell history
+và danh sách file/thư mục gần đây của Windows. Mấy chỗ này nằm trong `AppData`
+nên bước quét thường bỏ qua; nếu không xoá, sau khi dọn project thì menu
+**Recent / Open Recent** của IDE vẫn hiện project đã mất. Danh sách chi tiết
+ghi ở `danh-sach-ide-<thời gian>.txt`.
+
+Chỉ muốn xem lịch sử IDE: `.\scan-once.ps1 -Kind IdeHistory`.
+
 Desktop, Downloads, Documents, ... của mọi profile không bao giờ bị đề xuất
 nguyên thư mục, chỉ các mục con. Thêm `-DevFoldersOnly` để chỉ quét
 `source\repos`, `Projects`, `D:\Projects`, ...

@@ -29,7 +29,10 @@
     Độ sâu tối đa tính từ mỗi root. Mặc định 10.
 
 .PARAMETER Kind
-    Chỉ lấy các loại này. Mặc định: Project, DevDir, Secret, CodeFile.
+    Chỉ lấy các loại này. Mặc định: Project, DevDir, Secret, CodeFile, IdeHistory.
+    IdeHistory = lịch sử project của IDE (VS Code, Cursor, JetBrains, Sublime,
+    SSMS, ...) và danh sách file/thư mục gần đây của Windows. Xoá các mục này
+    thì project đã xoá không còn hiện lại trong menu "Recent / Open Recent".
 
 .PARAMETER OutDir
     Nơi ghi kết quả. Mặc định: %USERPROFILE%\presale-scan-<timestamp>
@@ -74,8 +77,8 @@ param(
 
     [int]$MaxDepth = 10,
 
-    [ValidateSet('Project', 'DevDir', 'Secret', 'CodeFile', 'All')]
-    [string[]]$Kind = @('Project', 'DevDir', 'Secret', 'CodeFile'),
+    [ValidateSet('Project', 'DevDir', 'Secret', 'CodeFile', 'IdeHistory', 'All')]
+    [string[]]$Kind = @('Project', 'DevDir', 'Secret', 'CodeFile', 'IdeHistory'),
 
     [string]$OutDir,
 
@@ -243,6 +246,66 @@ $script:SecretFilePatterns = @(
 )
 
 $script:SecretDirNames = @('.ssh', '.gnupg', '.aws', '.azure', '.kube', '.password-store')
+
+# -----------------------------------------------------------------------------
+# Lịch sử project của IDE: nằm trong AppData nên bước quét thường bỏ qua.
+# Xoá project mà không xoá mấy chỗ này thì project vẫn hiện trong menu
+# "Recent / Open Recent" của IDE.
+#
+# Mỗi phần tử: Path = đường dẫn tương đối dưới profile; Kind = File | DirTree;
+# Label = tên IDE để ghi lý do.
+#   File    : một file, gồm cả file cấp sâu (vd workspaceStorage\<hash>\workspace.json)
+#   DirTree : cả cây thư mục (vd JetBrains RecentProjects)
+# -----------------------------------------------------------------------------
+$script:IdeHistoryEntries = @(
+    # VS Code / Cursor / VSCodium / các bản fork
+    @{ Path = 'AppData\Roaming\Code\User\globalStorage\storage.json'; Kind = 'File'; Label = 'VS Code' }
+    @{ Path = 'AppData\Roaming\Code\User\History'; Kind = 'DirTree'; Label = 'VS Code' }
+    @{ Path = 'AppData\Roaming\Code\User\workspaceStorage'; Kind = 'DirTree'; Label = 'VS Code' }
+    @{ Path = 'AppData\Roaming\Code\Backups'; Kind = 'DirTree'; Label = 'VS Code' }
+    @{ Path = 'AppData\Roaming\Code - Insiders\User\globalStorage\storage.json'; Kind = 'File'; Label = 'VS Code Insiders' }
+    @{ Path = 'AppData\Roaming\Code - Insiders\User\workspaceStorage'; Kind = 'DirTree'; Label = 'VS Code Insiders' }
+    @{ Path = 'AppData\Roaming\Cursor\User\globalStorage\storage.json'; Kind = 'File'; Label = 'Cursor' }
+    @{ Path = 'AppData\Roaming\Cursor\User\workspaceStorage'; Kind = 'DirTree'; Label = 'Cursor' }
+    @{ Path = 'AppData\Roaming\Cursor\User\History'; Kind = 'DirTree'; Label = 'Cursor' }
+    @{ Path = 'AppData\Roaming\VSCodium\User\globalStorage\storage.json'; Kind = 'File'; Label = 'VSCodium' }
+    @{ Path = 'AppData\Roaming\Windsurf\User\globalStorage\storage.json'; Kind = 'File'; Label = 'Windsurf' }
+    @{ Path = 'AppData\Roaming\Trae\User\globalStorage\storage.json'; Kind = 'File'; Label = 'Trae' }
+    @{ Path = 'AppData\Roaming\Antigravity\User\globalStorage\storage.json'; Kind = 'File'; Label = 'Antigravity' }
+    @{ Path = 'AppData\Roaming\Zed\db'; Kind = 'DirTree'; Label = 'Zed' }
+
+    # JetBrains (IntelliJ, PyCharm, WebStorm, GoLand, Rider, ...)
+    @{ Path = 'AppData\Roaming\JetBrains'; Kind = 'DirTree'; Label = 'JetBrains' }
+
+    # Visual Studio
+    @{ Path = 'AppData\Local\Microsoft\VisualStudio\17.0_*\privateregistry.bin'; Kind = 'File'; Label = 'Visual Studio 2022' }
+    @{ Path = 'AppData\Local\Microsoft\VisualStudio\16.0_*\privateregistry.bin'; Kind = 'File'; Label = 'Visual Studio 2019' }
+    @{ Path = 'AppData\Local\Microsoft\VisualStudio\17.0_*\FileHistory'; Kind = 'DirTree'; Label = 'Visual Studio 2022' }
+    @{ Path = 'AppData\Local\Microsoft\VisualStudio\16.0_*\FileHistory'; Kind = 'DirTree'; Label = 'Visual Studio 2019' }
+    @{ Path = 'AppData\Local\Microsoft\VSCommon\*\SQM'; Kind = 'DirTree'; Label = 'Visual Studio' }
+
+    # SQL Server Management Studio (danh sách .sql mở gần đây)
+    @{ Path = 'AppData\Roaming\Microsoft\SQL Server Management Studio'; Kind = 'DirTree'; Label = 'SSMS' }
+    @{ Path = 'AppData\Roaming\Microsoft\SSMS'; Kind = 'DirTree'; Label = 'SSMS' }
+
+    # Sublime Text
+    @{ Path = 'AppData\Roaming\Sublime Text*\Local\Session.sublime_session'; Kind = 'File'; Label = 'Sublime Text' }
+    @{ Path = 'AppData\Roaming\Sublime Text*\Local\Auto Save Session.sublime_session'; Kind = 'File'; Label = 'Sublime Text' }
+
+    # IDE khác
+    @{ Path = 'AppData\Roaming\CodeBlocks\default.conf'; Kind = 'File'; Label = 'Code::Blocks' }
+    @{ Path = 'AppData\Roaming\Notepad++\config.xml'; Kind = 'File'; Label = 'Notepad++' }
+    @{ Path = 'AppData\Roaming\Notepad++\session.xml'; Kind = 'File'; Label = 'Notepad++' }
+    @{ Path = 'AppData\Roaming\Replit\*'; Kind = 'DirTree'; Label = 'Replit' }
+    @{ Path = 'AppData\Roaming\Claude\claude_desktop_config.json'; Kind = 'File'; Label = 'Claude Desktop' }
+
+    # Terminal / shell: history và danh sách thư mục gần đây
+    @{ Path = 'AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine'; Kind = 'DirTree'; Label = 'PowerShell' }
+    @{ Path = 'AppData\Roaming\Microsoft\Windows\Recent\AutomaticDestinations'; Kind = 'DirTree'; Label = 'Windows Jump List' }
+    @{ Path = 'AppData\Roaming\Microsoft\Windows\Recent\CustomDestinations'; Kind = 'DirTree'; Label = 'Windows Jump List' }
+    @{ Path = 'AppData\Roaming\Microsoft\Windows\Recent'; Kind = 'DirTree'; Label = 'Windows Recent' }
+    @{ Path = 'AppData\Local\Microsoft\Windows\Explorer\thumbcache_*.db'; Kind = 'File'; Label = 'Explorer thumbnail cache' }
+)
 
 $script:NeverTouchNames = @(
     '$Recycle.Bin', 'System Volume Information', 'Config.Msi'
@@ -794,6 +857,72 @@ function New-ScanTarget {
     }
 }
 
+function Get-IdeHistoryTargets {
+    <#
+        Dò lịch sử project của IDE. Trả về danh sách target (cùng dạng với
+        Invoke-Scan) để Out-Report xử lý như mọi mục khác.
+
+        Mục đích: sau khi xoá project, xoá luôn dấu vết trong IDE, nếu không
+        menu "Recent / Open Recent" vẫn hiện project đã mất.
+    #>
+    param([int]$Limit)
+
+    $found = New-Object 'System.Collections.Generic.List[object]'
+    $profileDir = [Environment]::GetFolderPath('UserProfile')
+    if ([string]::IsNullOrWhiteSpace($profileDir)) { return $found.ToArray() }
+
+    $reparseFlag = [int][System.IO.FileAttributes]::ReparsePoint
+    $dirFlag = [int][System.IO.FileAttributes]::Directory
+
+    foreach ($entry in $script:IdeHistoryEntries) {
+        # Wildcard trong đường dẫn tương đối: mở rộng từng đoạn một.
+        $segments = @($entry.Path.Split('\'))
+        $current = @($profileDir)
+        foreach ($segment in $segments) {
+            $next = New-Object 'System.Collections.Generic.List[string]'
+            foreach ($base in $current) {
+                if ($segment -notmatch '[\*\?]') {
+                    $candidate = Join-PathSafe $base $segment
+                    if (Test-PathExists $candidate) { $next.Add($candidate) }
+                    continue
+                }
+                try {
+                    foreach ($match in [System.IO.Directory]::GetFileSystemEntries((To-LongPath $base), $segment)) {
+                        $next.Add((From-LongPath $match))
+                    }
+                } catch { }
+            }
+            $current = $next.ToArray()
+            if ($current.Count -eq 0) { break }
+        }
+        if ($current.Count -eq 0) { continue }
+
+        foreach ($matchPath in $current) {
+            $isDir = [System.IO.Directory]::Exists((To-LongPath $matchPath))
+            $expanded = Expand-Target -Value $matchPath -Limit $Limit
+            if ($expanded.Size -le 0 -and $expanded.Paths.Count -eq 0 -and $expanded.Dirs.Count -eq 0) { continue }
+
+            $reason = "Lịch sử project của $($entry.Label)"
+            if ($entry.Kind -eq 'File') {
+                # File đơn lẻ: chỉ lấy chính nó, không lấy cả thư mục cha.
+                $expanded.Dirs.Clear()
+            }
+
+            $target = New-ScanTarget -Path $matchPath -Name (Split-Path -Leaf $matchPath) `
+                -Kind 'IdeHistory' -Reason $reason -Expanded $expanded
+            # Guard chặn AppData cho mục thường, nhưng lịch sử IDE nằm đúng trong
+            # AppData nên bỏ lý do chặn ở đây; các kiểm tra khác vẫn giữ.
+            if ($null -ne $target.Blocked -and $target.Blocked -notlike 'Nằm trong AppData*') {
+                continue
+            }
+            $target.Blocked = $null
+            [void]$found.Add($target)
+        }
+    }
+
+    return $found.ToArray()
+}
+
 function Invoke-Scan {
     <#
         Duyệt toàn bộ root, trả về:
@@ -1002,6 +1131,11 @@ function Invoke-Scan {
         }
     }
 
+    # Lịch sử IDE nằm trong AppData (bị bỏ qua khi duyệt) nên phải dò riêng.
+    foreach ($ideTarget in @(Get-IdeHistoryTargets -Limit $MaxFilesPerTarget)) {
+        [void]$targets.Add($ideTarget)
+    }
+
     return @{
         Targets = $targets.ToArray()
         Notes   = $notes.ToArray()
@@ -1042,7 +1176,7 @@ function Out-Report {
 
     # Lọc theo Kind
     $wantedKinds = if ($Kind -contains 'All') {
-        @('Project', 'DevDir', 'Secret', 'CodeFile')
+        @('Project', 'DevDir', 'Secret', 'CodeFile', 'IdeHistory')
     } else {
         $Kind
     }
@@ -1086,6 +1220,8 @@ function Out-Report {
     $jsonPath = Join-PathSafe $Destination ("danh-sach-file-{0}.json" -f $script:RunId)
     # Thư mục của từng target, sắp theo độ dài giảm dần: xoá con trước cha.
     $dirsPath = Join-PathSafe $Destination ("danh-sach-thu-muc-{0}.txt" -f $script:RunId)
+    # Đường dẫn lịch sử IDE: remove-once.ps1 dùng để cho phép xoá trong AppData.
+    $idePath = Join-PathSafe $Destination ("danh-sach-ide-{0}.txt" -f $script:RunId)
 
     $noBom = New-Object System.Text.UTF8Encoding($false)
     $withBom = New-Object System.Text.UTF8Encoding($true)
@@ -1213,6 +1349,19 @@ function Out-Report {
         $dirLines.Add('')
         foreach ($dir in $sortedDirs) { $dirLines.Add($dir) }
         [System.IO.File]::WriteAllLines((To-LongPath $dirsPath), $dirLines.ToArray(), $noBom)
+
+        # --- Lịch sử IDE ---
+        $ideLines = New-Object 'System.Collections.Generic.List[string]'
+        $ideFileCount = 0
+        foreach ($ideTarget in @($targets | Where-Object { $_.Kind -eq 'IdeHistory' })) {
+            $ideFileCount += $ideTarget.Paths.Count
+        }
+        $ideLines.Add('# presale-wiper - lịch sử project của IDE (xoá để menu Recent không còn hiện project đã mất)')
+        $ideTargets = @($targets | Where-Object { $_.Kind -eq 'IdeHistory' })
+        $ideLines.Add("# Số mục: $($ideTargets.Count)")
+        $ideLines.Add('')
+        foreach ($ideTarget in $ideTargets) { $ideLines.Add(('{0}|{1}' -f $ideTarget.Path, $ideTarget.Reason)) }
+        [System.IO.File]::WriteAllLines((To-LongPath $idePath), $ideLines.ToArray(), $noBom)
     } finally {
         $txt.Dispose()
         $csv.Dispose()
@@ -1224,6 +1373,8 @@ function Out-Report {
         Csv       = $csvPath
         Json      = $jsonPath
         Dirs      = $dirsPath
+        Ide       = $idePath
+        IdeFileCount = $ideFileCount
         Targets   = $targets
         FileCount = $count
         TopFiles  = $topFiles.ToArray()
@@ -1273,7 +1424,14 @@ function Show-Summary {
     Write-Green ("  CSV  (chi tiết)       : {0}" -f $Report.Csv)
     Write-Green ("  JSON (cho tooling)    : {0}" -f $Report.Json)
     Write-Green ("  DIRS (thư mục)        : {0}" -f $Report.Dirs)
+    Write-Green ("  IDE  (lịch sử IDE)    : {0}" -f $Report.Ide)
     Write-Green ''
+    $ideCount = @($Report.Targets | Where-Object { $_.Kind -eq 'IdeHistory' }).Count
+    if ($ideCount -gt 0) {
+        Write-Green ("Đã tìm thấy {0} mục lịch sử IDE ({1} file). Xoá chúng để project đã xoá không còn hiện trong menu Recent/Open Recent." -f `
+                $ideCount, $Report.IdeFileCount)
+        Write-Green ''
+    }
     Write-Green 'CHƯA có file nào bị xoá.'
     Write-Green ''
 }
