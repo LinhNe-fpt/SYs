@@ -64,10 +64,22 @@ Hoặc từ PowerShell:
 .\scan-once.ps1
 ```
 
-Mặc định quét cả `%USERPROFILE%` (bỏ qua AppData, thư mục hệ thống; trong
-`.vscode`, `.cargo`, ... chỉ tìm secret) và các thư mục dev ở gốc ổ. Desktop,
-Downloads, Documents không bao giờ bị đề xuất nguyên thư mục, chỉ các mục con.
-Thêm `-DevFoldersOnly` để chỉ quét `source\repos`, `Projects`, ...
+Mặc định quét **toàn bộ PC**: gốc mọi ổ cố định (`C:\`, `D:\`, ...; không quét
+USB / ổ mạng). Tự bỏ qua:
+
+- Windows, Program Files, ProgramData, AppData, thùng rác, System Volume Information
+- toolchain / game / driver nằm ngay dưới gốc ổ (`C:\Python312`, `C:\Go`,
+  `D:\SteamLibrary`, `Riot Games`, `msys64`, ...)
+- thư mục phần mềm đã cài (có `.exe`/`.dll` mà không có marker project); riêng
+  web server như xampp vẫn xét `htdocs` / `www`
+- trong `.vscode`, `.cargo`, ... của mỗi profile: chỉ tìm secret
+
+Desktop, Downloads, Documents, ... của mọi profile không bao giờ bị đề xuất
+nguyên thư mục, chỉ các mục con. Thêm `-DevFoldersOnly` để chỉ quét
+`source\repos`, `Projects`, `D:\Projects`, ...
+
+Quét profile của người dùng khác cần chạy bằng quyền admin; không có quyền thì
+các thư mục đó bị bỏ qua.
 
 Kết quả ghi vào `%USERPROFILE%\presale-scan-<timestamp>\`:
 

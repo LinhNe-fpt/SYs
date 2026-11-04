@@ -17,8 +17,10 @@
     cần dọn, hãy đọc danh sách rồi tự quyết định.
 
 .PARAMETER Path
-    Thư mục cần quét. Bỏ trống thì quét %USERPROFILE% (trừ AppData và thư mục
-    hệ thống) cộng các thư mục dev ở gốc ổ (D:\Projects, ...). KHÔNG quét cả ổ C:.
+    Thư mục cần quét. Bỏ trống thì quét TOÀN BỘ PC: gốc mọi ổ cố định (C:\, D:\,
+    ...). Tự bỏ qua Windows, Program Files, ProgramData, AppData, thùng rác,
+    toolchain/game/driver ở gốc ổ (C:\Python312, D:\SteamLibrary, ...) và thư
+    mục phần mềm đã cài (có .exe/.dll). Không quét USB / ổ mạng.
 
 .PARAMETER MinSize
     Chỉ liệt kê mục >= kích thước này. Nhận '100MB', '1.5GB', hoặc số byte.
@@ -37,8 +39,8 @@
     treo máy. Mặc định 50000. Danh sách bị cắt sẽ được ghi rõ.
 
 .PARAMETER DevFoldersOnly
-    Không quét cả %USERPROFILE%, chỉ quét các thư mục dev quen thuộc
-    (source\repos, Projects, Developer, ...). Nhanh hơn nhưng dễ bỏ sót.
+    Không quét toàn bộ PC, chỉ quét các thư mục dev quen thuộc
+    (source\repos, Projects, Developer, D:\Projects, ...). Nhanh hơn nhưng dễ bỏ sót.
 
 .PARAMETER IncludeHome
     Giữ để tương thích, không còn tác dụng (home đã được quét mặc định).
@@ -190,7 +192,34 @@ $script:SkipDirNames = @(
     'ProgramData', 'Recovery', 'PerfLogs', 'Boot'
     'OneDrive'
     'WindowsPowerShell'
+    'WindowsApps', 'WpSystem', '$WinREAgent', '$Windows.~BT', '$Windows.~WS'
+    '$SysReset', '$GetCurrent'
 )
+
+# Chỉ bỏ qua khi nằm NGAY dưới gốc ổ (C:\Python312, D:\SteamLibrary, ...):
+# đó là toolchain/game/driver đã cài, không phải project. Ở chỗ khác, một thư
+# mục tên 'tools' hay 'Go' vẫn có thể là code của người dùng.
+$script:DriveRootSkipPatterns = @(
+    'Intel', 'AMD', 'NVIDIA', 'Drivers', 'MSOCache', 'ESD', 'OneDriveTemp'
+    'Windows10Upgrade', 'XboxGames', 'SteamLibrary', 'Steam', 'Epic Games', 'Riot Games', 'Garena'
+    'Go', 'flutter', 'Android', 'msys64', 'msys32', 'cygwin', 'cygwin64'
+    'MinGW', 'mingw32', 'mingw64', 'Strawberry', 'Qt', 'tools'
+    'Python*', 'Ruby*', 'jdk*', 'Perl*', 'Program Files*'
+)
+
+# Thư mục đặc biệt trong MỌI profile (C:\Users\<ai đó>\...): chỉ đi vào trong,
+# không bao giờ đề xuất cả thư mục.
+$script:ProfileContainerNames = @(
+    'Desktop', 'Downloads', 'Documents', 'Pictures', 'Music', 'Videos'
+    'Favorites', 'Contacts', 'Links', 'Saved Games', 'Searches', '3D Objects', 'OneDrive'
+)
+
+# Profile hệ thống dưới C:\Users: không phải người dùng thật.
+$script:SystemProfileNames = @('Default', 'Default User', 'All Users', 'defaultuser0')
+
+# Có các file này trực tiếp trong thư mục (mà không có marker project) thì đó
+# là phần mềm đã cài / bản portable, không đi vào.
+$script:InstalledBinaryExtensions = @('.exe', '.dll', '.sys', '.msi')
 
 $script:SecretFileNames = @(
     '.env', '.netrc', '.npmrc', '.pypirc', '.git-credentials', '.gitconfig'
@@ -241,6 +270,7 @@ function New-WildcardRegex {
 $script:SecretRegex = New-WildcardRegex $script:SecretFilePatterns
 $script:MarkerRegex = New-WildcardRegex $script:ProjectMarkerPatterns
 $script:DotnetManifestRegex = New-WildcardRegex @('*.deps.json', '*.runtimeconfig*.json')
+$script:DriveRootSkipRegex = New-WildcardRegex $script:DriveRootSkipPatterns
 
 $script:Lookup = @{
     Code        = New-LookupSet $script:CodeExtensions
@@ -253,6 +283,9 @@ $script:Lookup = @{
     SecretFiles = New-LookupSet $script:SecretFileNames
     SecretDirs  = New-LookupSet $script:SecretDirNames
     NeverTouch  = New-LookupSet $script:NeverTouchNames
+    ProfileContainers = New-LookupSet $script:ProfileContainerNames
+    SystemProfiles    = New-LookupSet $script:SystemProfileNames
+    InstalledBinaries = New-LookupSet $script:InstalledBinaryExtensions
 }
 
 # =============================================================================
@@ -556,6 +589,8 @@ function Get-FolderVerdict {
     $secretRegex = $script:SecretRegex
     $codeSet = $script:Lookup.Code
     $mediaSet = $script:Lookup.Media
+    $installedSet = $script:Lookup.InstalledBinaries
+    $binaries = 0
 
     foreach ($child in $Children) {
         $name = $child.Name
@@ -570,9 +605,14 @@ function Get-FolderVerdict {
         $ext = $name.Substring($dot)
         if ($codeSet.Contains($ext)) { $code++ }
         elseif ($mediaSet.Contains($ext)) { $media++ }
+        elseif ($installedSet.Contains($ext)) { $binaries++ }
     }
 
     if ($markers -gt 0) { return @{ Kind = 'Project'; Reason = "Có $markers marker project" } }
+
+    # Từ 2 file .exe/.dll trở lên: bộ cài (xampp, portable app), dù cạnh đó có
+    # nhiều .bat/.cmd/.js khiến tỉ lệ code cao.
+    if ($binaries -ge 2) { return @{ Kind = 'Installed'; Reason = "Phần mềm đã cài: $binaries file .exe/.dll" } }
 
     if ($total -gt 0) {
         $codeRatio = [double]$code / [double]$total
@@ -585,6 +625,9 @@ function Get-FolderVerdict {
             return @{ Kind = 'MediaHeavy'; Reason = ('Media chi phối: {0}/{1}' -f $media, $total) }
         }
     }
+
+    # Python, Git, Node bản portable, game, ... : có .exe/.dll cạnh vài script.
+    if ($binaries -gt 0) { return @{ Kind = 'Installed'; Reason = "Phần mềm đã cài: $binaries file .exe/.dll" } }
 
     if ($code -ge 1) { return @{ Kind = 'Project'; Reason = "Có $code file code" } }
 
@@ -599,16 +642,25 @@ function Get-DefaultRoots {
     $roots = New-Object 'System.Collections.Generic.List[string]'
     $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 
-    $home_ = [Environment]::GetFolderPath('UserProfile')
-
-    if (-not $DevFoldersOnly -and -not [string]::IsNullOrWhiteSpace($home_)) {
-        if ((Test-PathExists $home_) -and $seen.Add($home_)) { $roots.Add($home_) }
+    if (-not $DevFoldersOnly) {
+        # Toàn bộ PC: gốc mọi ổ cố định. Thư mục hệ thống / phần mềm đã cài bị
+        # loại trong lúc duyệt (SkipDirNames, DriveRootSkipPatterns, Installed).
+        try {
+            foreach ($drive in [System.IO.DriveInfo]::GetDrives()) {
+                if (-not $drive.IsReady) { continue }
+                if ($drive.DriveType -ne [System.IO.DriveType]::Fixed) { continue }
+                if ($seen.Add($drive.RootDirectory.FullName)) { $roots.Add($drive.RootDirectory.FullName) }
+            }
+        } catch { }
+        return $roots.ToArray()
     }
+
+    $home_ = [Environment]::GetFolderPath('UserProfile')
 
     foreach ($relative in @('source\repos', 'source', 'repos', 'Projects', 'projects',
             'Developer', 'dev', 'code', 'Code', 'workspace', 'Workspace', 'git', 'Git',
             'Documents\Projects', 'Documents\Source', 'Documents\GitHub')) {
-        if ([string]::IsNullOrWhiteSpace($home_) -or $roots.Count -gt 0) { break }
+        if ([string]::IsNullOrWhiteSpace($home_)) { break }
         $candidate = Join-PathSafe $home_ $relative
         if ((Test-PathExists $candidate) -and $seen.Add($candidate)) { $roots.Add($candidate) }
     }
@@ -713,7 +765,8 @@ function Invoke-Scan {
         Truncated      = $false
     }
 
-    $maxEntries = 750000
+    # Trần tính riêng cho từng root (mỗi ổ), để ổ C: đầy file không làm bỏ sót ổ D:.
+    $maxEntries = 3000000
 
     # Vòng duyệt chạy cho mọi entry trên đĩa: đọc sẵn hằng số và lookup ra
     # biến local, tự phân loại inline thay vì gọi hàm cho từng file.
@@ -728,8 +781,14 @@ function Invoke-Scan {
     $manifestRegex = $script:DotnetManifestRegex
     $forbidden = $script:ForbiddenLookup
     $homeDir = if ($null -ne $script:UserProfileDir) { $script:UserProfileDir.TrimEnd('\') } else { $null }
+    $usersDir = if ($null -ne $homeDir) { [System.IO.Path]::GetDirectoryName($homeDir) } else { $null }
+    $driveRootSkip = $script:DriveRootSkipRegex
+    $profileContainers = $script:Lookup.ProfileContainers
+    $systemProfiles = $script:Lookup.SystemProfiles
+    $webRoots = New-LookupSet @('htdocs', 'www', 'wwwroot', 'webapps', 'public_html')
 
     foreach ($root in $Roots) {
+        $rootEntries = 0
         $resolved = Get-NormalizedPath $root
         if ($null -eq $resolved -or -not (Test-PathExists $resolved)) {
             [void]$notes.Add([PSCustomObject]@{ Path = $root; Note = 'Không tồn tại, bỏ qua.' })
@@ -747,7 +806,7 @@ function Invoke-Scan {
             $depth = $item.Depth
             $secretsOnly = $item.SecretsOnly
 
-            if ($stats.EntriesVisited -ge $maxEntries) {
+            if ($rootEntries -ge $maxEntries) {
                 $stats.Truncated = $true
                 [void]$notes.Add([PSCustomObject]@{
                         Path = $currentPath
@@ -763,9 +822,15 @@ function Invoke-Scan {
             if ($null -eq $children) { $children = @(Get-ChildInfos $currentPath) }
             $stats.FoldersVisited++
             $stats.EntriesVisited += $children.Count
+            $rootEntries += $children.Count
 
-            $isHomeLevel = $null -ne $homeDir -and
-                [string]::Equals($currentPath.TrimEnd('\'), $homeDir, [StringComparison]::OrdinalIgnoreCase)
+            # Gốc một profile bất kỳ: home hiện tại hoặc C:\Users\<ai đó>.
+            $trimmed = $currentPath.TrimEnd('\')
+            $parentDir = [System.IO.Path]::GetDirectoryName($trimmed)
+            $isHomeLevel = ($null -ne $homeDir -and [string]::Equals($trimmed, $homeDir, [StringComparison]::OrdinalIgnoreCase)) -or
+                ($null -ne $usersDir -and $null -ne $parentDir -and [string]::Equals($parentDir, $usersDir, [StringComparison]::OrdinalIgnoreCase))
+            $isUsersDir = $null -ne $usersDir -and [string]::Equals($trimmed, $usersDir, [StringComparison]::OrdinalIgnoreCase)
+            $isDriveRoot = $currentPath -match '^[A-Za-z]:\\?$'
 
             foreach ($child in $children) {
                 $attributes = [int]$child.Attributes
@@ -791,6 +856,16 @@ function Invoke-Scan {
                     }
 
                     if ($null -eq $kindLabel) {
+                        if ($isDriveRoot -and $driveRootSkip.IsMatch($name)) { continue }
+                        if ($isUsersDir -and $systemProfiles.Contains($name)) { continue }
+
+                        if ($isHomeLevel -and $profileContainers.Contains($name)) {
+                            if ($depth -lt $MaxDepth) {
+                                $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $false; Children = $null })
+                            }
+                            continue
+                        }
+
                         # .vscode, .rustup, .cargo, ... ngay dưới home là dữ liệu của
                         # công cụ đã cài, không phải project của người dùng: chỉ tìm
                         # secret trong đó (vd .ollama\id_ed25519).
@@ -813,7 +888,21 @@ function Invoke-Scan {
                         $subChildren = @(Get-ChildInfos $childPath)
                         $verdict = Get-FolderVerdict -Children $subChildren
 
-                        # MediaHeavy: không phải code, không đưa vào danh sách dọn.
+                        # MediaHeavy / Installed: không phải code của người dùng, không đi vào.
+                        # Riêng web server (xampp, wamp, ...) vẫn xét thư mục web root,
+                        # vì đó là nơi người dùng để code PHP/web.
+                        if ($verdict.Kind -eq 'Installed') {
+                            foreach ($sub in $subChildren) {
+                                if (([int]$sub.Attributes -band $dirFlag) -eq 0) { continue }
+                                if (([int]$sub.Attributes -band $reparseFlag) -ne 0) { continue }
+                                if ($webRoots.Contains($sub.Name) -and $depth + 1 -lt $MaxDepth) {
+                                    $subPath = $sub.FullName
+                                    if ($subPath.StartsWith('\\?\')) { $subPath = From-LongPath $subPath }
+                                    $queue.Enqueue(@{ Path = $subPath; Depth = ($depth + 2); SecretsOnly = $false; Children = $null })
+                                }
+                            }
+                            continue
+                        }
                         if ($verdict.Kind -eq 'MediaHeavy') { continue }
                         if ($verdict.Kind -ne 'Project') {
                             $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $false; Children = $subChildren })
