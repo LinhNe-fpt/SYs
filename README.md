@@ -54,12 +54,11 @@ Nếu bạn chỉ muốn **danh sách file cần dọn** để tự xem, dùng `
 file độc lập, không import module, không cần admin, không hỏi xác nhận, và
 **không chứa bất kỳ lệnh xoá nào**.
 
-Cách dễ nhất: **double-click `presale-scan.cmd`**, một file duy nhất, tạo bằng
-`.\tools\Build-PresaleScanCmd.ps1`. Không hỏi gì và **chạy ẩn**: không có cửa
-sổ console (vẫn thấy `powershell.exe` trong Task Manager); quét xong tự mở thư
-mục kết quả trong Explorer; nếu lỗi thì hiện hộp thoại. Cần xem log trên
-console thì build bằng `-Visible`. (`scan-once.cmd` làm tương tự nhưng cần nằm
-cạnh `scan-once.ps1`.)
+Cách dễ nhất: **double-click `presale-scan.cmd`** — **một file duy nhất, tự đủ**:
+`scan-once.ps1` và `remove-once.ps1` đã được gộp vào (phần xoá nhúng Base64 ở
+cuối file), nên chỉ cần chép đúng 1 file, không cần mang theo `.ps1` nào.
+Tạo bằng `.\tools\Build-PresaleScanCmd.ps1 -Visible`. Quét xong in kết quả màu
+xanh lá, gõ `XOA` rồi Enter để xoá vĩnh viễn (Ấn Enter suông để dừng).
 
 Nếu file được tải qua trình duyệt / Zalo / email, Windows gắn nhãn "từ
 Internet" và hỏi một lần trước khi chạy. Bỏ nhãn trước khi chạy: chuột phải

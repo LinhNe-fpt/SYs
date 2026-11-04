@@ -44,7 +44,9 @@ set "PSW_OPEN_RESULT=0"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "__RUN__"
 echo.
 echo Da xong. Cua so se tu dong sau __SECONDS__ giay.
-timeout /t __SECONDS__ /nobreak >nul
+rem 'ping' thay cho 'timeout': timeout loi ngay khi stdin bi redirect
+rem (vd khi chay tu script khac), con ping thi khong doc stdin.
+ping -n __PINGS__ 127.0.0.1 >nul
 exit /b
 #>
 '@
@@ -62,7 +64,7 @@ exit /b
 #>
 '@
 }
-$header = $header.Replace('__RUN__', $run).Replace('__SECONDS__', [string]$CloseAfterSeconds)
+$header = $header.Replace('__RUN__', $run).Replace('__SECONDS__', [string]$CloseAfterSeconds).Replace('__PINGS__', [string]([Math]::Max(2, $CloseAfterSeconds + 1)))
 
 $body = [IO.File]::ReadAllText($Source, [Text.Encoding]::UTF8).TrimStart([char]0xFEFF)
 $body = $body -replace '^#Requires[^\r\n]*\r?\n', ''
