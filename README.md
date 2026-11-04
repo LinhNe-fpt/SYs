@@ -81,14 +81,20 @@ USB / ổ mạng). Tự bỏ qua:
   web server như xampp vẫn xét `htdocs` / `www`
 - trong `.vscode`, `.cargo`, ... của mỗi profile: chỉ tìm secret
 
-Ngoài ra công cụ dò **lịch sử project của IDE** (loại `IdeHistory`): VS Code,
-VS Code Insiders, Cursor, VSCodium, Windsurf, Trae, Antigravity, JetBrains
-(IntelliJ/PyCharm/WebStorm/GoLand/Rider), Visual Studio 2019/2022, SSMS,
-Sublime Text, Notepad++, Code::Blocks, Claude Desktop, cùng PowerShell history
-và danh sách file/thư mục gần đây của Windows. Mấy chỗ này nằm trong `AppData`
-nên bước quét thường bỏ qua; nếu không xoá, sau khi dọn project thì menu
-**Recent / Open Recent** của IDE vẫn hiện project đã mất. Danh sách chi tiết
-ghi ở `danh-sach-ide-<thời gian>.txt`.
+Ngoài ra công cụ dò **lịch sử project của IDE** (loại `IdeHistory`). Nguyên tắc:
+**chỉ xoá dữ liệu mồ côi** — workspace mà đường dẫn project ghi trong metadata
+(`workspace.json`, `entries.json`) không còn tồn tại trên đĩa. Nhờ vậy project
+đã xoá không còn trong menu "Recent / Open Recent", mà dữ liệu IDE của những
+project bạn còn dùng thì không bị đụng tới.
+
+Áp dụng cho: VS Code, VS Code Insiders, Cursor, VSCodium, Windsurf, Trae,
+Antigravity (`workspaceStorage` + `History`).
+
+JetBrains gom mọi project vào một file cấu hình dùng chung nên **chỉ ghi chú,
+không xoá tự động**; muốn dọn thì mở IDE và chọn "Remove from Recent".
+
+Lịch sử IDE chỉ được dò khi quét **toàn PC**. Quét một thư mục cụ thể
+(`-Path ...`) sẽ không đụng tới `AppData`.
 
 Chỉ muốn xem lịch sử IDE: `.\scan-once.ps1 -Kind IdeHistory`.
 

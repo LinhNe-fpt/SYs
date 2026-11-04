@@ -41,7 +41,6 @@ rem presale-wiper: quet TOAN BO PC, in ket qua, Enter de chuyen sang buoc xoa.
 chcp 65001 >nul
 set "PSW_SELF=%~f0"
 set "PSW_OPEN_RESULT=0"
-set "PSW_ASK_DELETE=1"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "__RUN__"
 echo.
 echo Da xong. Cua so se tu dong sau __SECONDS__ giay.
@@ -58,7 +57,6 @@ rem presale-wiper: quet TOAN BO PC chay an, chi liet ke, KHONG XOA GI.
 set "PSW_SELF=%~f0"
 set "PSW_OPEN_RESULT=1"
 set "PSW_HIDDEN=1"
-set "PSW_ASK_DELETE=1"
 start "" /min powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -Command "__RUN__"
 exit /b
 #>

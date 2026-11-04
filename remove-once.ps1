@@ -23,6 +23,10 @@
 .PARAMETER Execute
     Xoá thật.
 
+.PARAMETER Yes
+    Đã xác nhận ở bước trước (scan-once.ps1 hỏi Enter): không hỏi lại.
+    Chỉ dùng cùng -Execute.
+
 .PARAMETER ConfirmToken
     Phải bằng 'XOA' khi dùng -Execute.
 
@@ -47,6 +51,8 @@ param(
     [switch]$FromScan,
 
     [switch]$Execute,
+
+    [switch]$Yes,
 
     [string]$ConfirmToken,
 
@@ -560,12 +566,15 @@ Write-Line ''
 Write-Line ("  Báo cáo: {0}" -f $txtPath)
 Write-Line ''
 
-if (-not $Execute -and -not $Quiet -and ((-not $FromScan) -or ($env:PSW_ASK_DELETE -eq '1'))) {
-    $interactive = (-not [Console]::IsInputRedirected) -or ($env:PSW_ASK_DELETE -eq '1')
+if (-not $Execute -and -not $Quiet -and -not $Yes) {
+    # Hỏi xác nhận khi chạy tương tác. Điều kiện dựa trên console thật, KHÔNG
+    # dựa vào biến môi trường: trước đây chỉ cần thiếu biến đó là bước xoá
+    # lặng lẽ dừng ở bản kế hoạch, khiến người dùng tưởng đã xoá.
+    $interactive = (-not [Console]::IsInputRedirected) -or $FromScan
     if ($interactive) {
         Write-Line 'Ấn Enter để xoá thật, đóng cửa sổ để huỷ.'
         $null = [Console]::ReadLine()
-        $recurse = @{ Plan = $planDir; Execute = $true; ConfirmToken = 'XOA' }
+        $recurse = @{ Plan = $planDir; Execute = $true; ConfirmToken = 'XOA'; Yes = $true }
         if ($Keep.Count -gt 0) { $recurse['Keep'] = $Keep }
         & $PSCommandPath @recurse
     }
