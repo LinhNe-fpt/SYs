@@ -54,9 +54,20 @@ Nếu bạn chỉ muốn **danh sách file cần dọn** để tự xem, dùng `
 file độc lập, không import module, không cần admin, không hỏi xác nhận, và
 **không chứa bất kỳ lệnh xoá nào**.
 
+Cách dễ nhất: **double-click `scan-once.cmd`** (đặt cùng thư mục với
+`scan-once.ps1`). Windows không mở `.ps1` bằng double-click, nên file `.cmd`
+gọi PowerShell giúp bạn và giữ cửa sổ lại cho tới khi bấm phím.
+
+Hoặc từ PowerShell:
+
 ```powershell
 .\scan-once.ps1
 ```
+
+Mặc định quét cả `%USERPROFILE%` (bỏ qua AppData, thư mục hệ thống; trong
+`.vscode`, `.cargo`, ... chỉ tìm secret) và các thư mục dev ở gốc ổ. Desktop,
+Downloads, Documents không bao giờ bị đề xuất nguyên thư mục, chỉ các mục con.
+Thêm `-DevFoldersOnly` để chỉ quét `source\repos`, `Projects`, ...
 
 Kết quả ghi vào `%USERPROFILE%\presale-scan-<timestamp>\`:
 

@@ -17,8 +17,8 @@
     cần dọn, hãy đọc danh sách rồi tự quyết định.
 
 .PARAMETER Path
-    Thư mục cần quét. Bỏ trống thì tự dùng các thư mục dev quen thuộc
-    (source\repos, Projects, Developer, ...), KHÔNG quét cả ổ C:.
+    Thư mục cần quét. Bỏ trống thì quét %USERPROFILE% (trừ AppData và thư mục
+    hệ thống) cộng các thư mục dev ở gốc ổ (D:\Projects, ...). KHÔNG quét cả ổ C:.
 
 .PARAMETER MinSize
     Chỉ liệt kê mục >= kích thước này. Nhận '100MB', '1.5GB', hoặc số byte.
@@ -36,8 +36,12 @@
     Trần số file liệt kê cho mỗi mục, để node_modules 200.000 file không làm
     treo máy. Mặc định 50000. Danh sách bị cắt sẽ được ghi rõ.
 
+.PARAMETER DevFoldersOnly
+    Không quét cả %USERPROFILE%, chỉ quét các thư mục dev quen thuộc
+    (source\repos, Projects, Developer, ...). Nhanh hơn nhưng dễ bỏ sót.
+
 .PARAMETER IncludeHome
-    Cho phép quét cả %USERPROFILE% (chậm hơn nhiều).
+    Giữ để tương thích, không còn tác dụng (home đã được quét mặc định).
 
 .PARAMETER Quiet
     Chỉ in tổng kết, không in bảng chi tiết.
@@ -71,6 +75,8 @@ param(
 
     [int]$MaxFilesPerTarget = 50000,
 
+    [switch]$DevFoldersOnly,
+
     [switch]$IncludeHome,
 
     [switch]$Quiet
@@ -86,6 +92,9 @@ $ErrorActionPreference = 'Stop'
 # xoá vào file này, hãy tạo file khác - giữ file này thuần read-only.
 
 $script:RunId = Get-Date -Format 'yyyyMMdd-HHmmss'
+
+# Console mặc định dùng codepage OEM (437/850) nên tiếng Việt thành '?'.
+try { [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false) } catch { }
 
 # =============================================================================
 # 1. Hằng số
@@ -180,6 +189,7 @@ $script:SkipDirNames = @(
     'Windows', 'Windows.old', 'Program Files', 'Program Files (x86)'
     'ProgramData', 'Recovery', 'PerfLogs', 'Boot'
     'OneDrive'
+    'WindowsPowerShell'
 )
 
 $script:SecretFileNames = @(
@@ -192,7 +202,8 @@ $script:SecretFileNames = @(
 
 $script:SecretFilePatterns = @(
     '.env.*', '*.pem', '*.key', '*.pfx', '*.p12', '*.jks', '*.keystore'
-    '*.kdbx', '*.ppk', '*.asc', '*.ovpn', 'id_*'
+    '*.kdbx', '*.ppk', '*.asc', '*.ovpn'
+    'id_rsa*', 'id_dsa*', 'id_ecdsa*', 'id_ed25519*'
     '*.tfstate.backup', '*credentials*.json', '*serviceaccount*.json'
 )
 
@@ -401,6 +412,24 @@ function Get-ForbiddenRoots {
         } catch { }
     }
 
+    # Environment.SpecialFolder không có Downloads/Saved Games/... nên lấy từ
+    # registry, kèm tên mặc định phòng khi bị chuyển chỗ.
+    $profileDir = [Environment]::GetFolderPath('UserProfile')
+    if (-not [string]::IsNullOrWhiteSpace($profileDir)) {
+        foreach ($name in @('Downloads', 'Desktop', 'Documents', 'Pictures', 'Music', 'Videos',
+                'Favorites', 'Contacts', 'Links', 'Saved Games', 'Searches', '3D Objects', 'OneDrive')) {
+            $list.Add((Join-PathSafe $profileDir $name))
+        }
+    }
+    try {
+        $shellFolders = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders' -ErrorAction Stop
+        foreach ($property in $shellFolders.PSObject.Properties) {
+            if ($property.Name -like 'PS*') { continue }
+            $value = [string]$property.Value
+            if ($value -match '^[A-Za-z]:\\') { $list.Add($value) }
+        }
+    } catch { }
+
     $systemDrive = [Environment]::GetEnvironmentVariable('SystemDrive')
     if ([string]::IsNullOrWhiteSpace($systemDrive)) { $systemDrive = 'C:' }
     foreach ($name in @('Windows', 'Program Files', 'Program Files (x86)', 'ProgramData',
@@ -418,6 +447,20 @@ function Get-ForbiddenRoots {
 }
 
 $script:ForbiddenRoots = Get-ForbiddenRoots
+$script:ForbiddenLookup = New-LookupSet $script:ForbiddenRoots
+$script:UserProfileDir = Get-NormalizedPath ([Environment]::GetFolderPath('UserProfile'))
+
+function Test-ProtectedContainer {
+    <#
+        Desktop, Downloads, Documents, ... : không bao giờ đề xuất cả thư mục,
+        chỉ đi vào trong để xét từng mục con.
+    #>
+    param([string]$Value)
+
+    $full = Get-NormalizedPath $Value
+    if ($null -eq $full) { return $false }
+    return $script:ForbiddenLookup.Contains($full.TrimEnd('\'))
+}
 
 function Get-BlockReason {
     <#
@@ -466,7 +509,9 @@ function Get-FileKind {
     if ([string]::IsNullOrWhiteSpace($Name)) { return 'Other' }
 
     if ($script:Lookup.SecretFiles.Contains($Name)) { return 'Secret' }
+    $isDotnetManifest = $Name -like '*.deps.json' -or $Name -like '*.runtimeconfig*.json'
     foreach ($pattern in @($script:SecretFilePatterns)) {
+        if ($isDotnetManifest) { break }
         if ($Name -like $pattern) { return 'Secret' }
     }
 
@@ -546,14 +591,14 @@ function Get-DefaultRoots {
 
     $home_ = [Environment]::GetFolderPath('UserProfile')
 
-    if ($IncludeHome -and -not [string]::IsNullOrWhiteSpace($home_)) {
+    if (-not $DevFoldersOnly -and -not [string]::IsNullOrWhiteSpace($home_)) {
         if ((Test-PathExists $home_) -and $seen.Add($home_)) { $roots.Add($home_) }
     }
 
     foreach ($relative in @('source\repos', 'source', 'repos', 'Projects', 'projects',
             'Developer', 'dev', 'code', 'Code', 'workspace', 'Workspace', 'git', 'Git',
             'Documents\Projects', 'Documents\Source', 'Documents\GitHub')) {
-        if ([string]::IsNullOrWhiteSpace($home_)) { break }
+        if ([string]::IsNullOrWhiteSpace($home_) -or $roots.Count -gt 0) { break }
         $candidate = Join-PathSafe $home_ $relative
         if ((Test-PathExists $candidate) -and $seen.Add($candidate)) { $roots.Add($candidate) }
     }
@@ -704,6 +749,7 @@ function Invoke-Scan {
             $item = $queue.Dequeue()
             $currentPath = $item.Path
             $depth = $item.Depth
+            $secretsOnly = [bool]$item['SecretsOnly']
 
             if ($stats.EntriesVisited -ge $maxEntries) {
                 $stats.Truncated = $true
@@ -737,6 +783,32 @@ function Invoke-Scan {
                     } elseif ($script:Lookup.SecretDirs.Contains($child.Name)) {
                         $kindLabel = 'Secret'
                         $reason = "Thư mục chứa thông tin đăng nhập: $($child.Name)"
+                    }
+
+                    if ($secretsOnly -and $kindLabel -eq 'DevDir') { $kindLabel = $null }
+
+                    # .vscode, .rustup, .cargo, ... ngay dưới home là dữ liệu của
+                    # công cụ đã cài, không phải project của người dùng: chỉ tìm
+                    # secret trong đó (vd .ollama\id_ed25519).
+                    if ($null -eq $kindLabel -and -not $secretsOnly -and $child.Name.StartsWith('.') -and
+                        $null -ne $script:UserProfileDir -and
+                        [string]::Equals((Get-NormalizedPath $currentPath), $script:UserProfileDir, [StringComparison]::OrdinalIgnoreCase)) {
+                        $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $true })
+                        continue
+                    }
+
+                    if ($null -eq $kindLabel -and $secretsOnly) {
+                        if ($depth -lt $MaxDepth) {
+                            $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1); SecretsOnly = $true })
+                        }
+                        continue
+                    }
+
+                    if ($null -eq $kindLabel -and (Test-ProtectedContainer $childPath)) {
+                        if ($depth -lt $MaxDepth) {
+                            $queue.Enqueue(@{ Path = $childPath; Depth = ($depth + 1) })
+                        }
+                        continue
                     }
 
                     if ($null -ne $kindLabel) {
@@ -804,6 +876,7 @@ function Invoke-Scan {
                 # --- File lẻ ---
                 $fileKind = Get-FileKind $child.Name
                 if ($fileKind -ne 'Secret' -and $fileKind -ne 'Code') { continue }
+                if ($secretsOnly -and $fileKind -ne 'Secret') { continue }
 
                 $label = if ($fileKind -eq 'Secret') { 'Secret' } else { 'CodeFile' }
                 $reason = if ($fileKind -eq 'Secret') {
